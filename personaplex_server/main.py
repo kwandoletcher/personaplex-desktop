@@ -401,8 +401,8 @@ def main():
     lm.eval()
     logger.info("PersonaPlex model loaded")
 
-    # Create LMGen - note: voice prompts not currently supported in moshi 0.2.12
-    lm_gen = LMGen(lm)
+    # Create LMGen with PersonaPlex's API
+    lm_gen = LMGen(lm, device=device)
 
     voice_prompt_dir = str(MODELS_DIR / "voices")
 
