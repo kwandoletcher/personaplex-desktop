@@ -1,0 +1,148 @@
+{
+  "voices": [
+    {
+      "id": "NATF0",
+      "name": "Natural Female 0",
+      "type": "Natural",
+      "gender": "Female",
+      "file": "NATF0.pt",
+      "description": "Natural conversational female voice"
+    },
+    {
+      "id": "NATF1",
+      "name": "Natural Female 1",
+      "type": "Natural",
+      "gender": "Female",
+      "file": "NATF1.pt",
+      "description": "Natural conversational female voice"
+    },
+    {
+      "id": "NATF2",
+      "name": "Natural Female 2",
+      "type": "Natural",
+      "gender": "Female",
+      "file": "NATF2.pt",
+      "description": "Natural conversational female voice"
+    },
+    {
+      "id": "NATF3",
+      "name": "Natural Female 3",
+      "type": "Natural",
+      "gender": "Female",
+      "file": "NATF3.pt",
+      "description": "Natural conversational female voice"
+    },
+    {
+      "id": "NATM0",
+      "name": "Natural Male 0",
+      "type": "Natural",
+      "gender": "Male",
+      "file": "NATM0.pt",
+      "description": "Natural conversational male voice"
+    },
+    {
+      "id": "NATM1",
+      "name": "Natural Male 1",
+      "type": "Natural",
+      "gender": "Male",
+      "file": "NATM1.pt",
+      "description": "Natural conversational male voice"
+    },
+    {
+      "id": "NATM2",
+      "name": "Natural Male 2",
+      "type": "Natural",
+      "gender": "Male",
+      "file": "NATM2.pt",
+      "description": "Natural conversational male voice"
+    },
+    {
+      "id": "NATM3",
+      "name": "Natural Male 3",
+      "type": "Natural",
+      "gender": "Male",
+      "file": "NATM3.pt",
+      "description": "Natural conversational male voice"
+    },
+    {
+      "id": "VARF0",
+      "name": "Variety Female 0",
+      "type": "Variety",
+      "gender": "Female",
+      "file": "VARF0.pt",
+      "description": "Diverse female voice"
+    },
+    {
+      "id": "VARF1",
+      "name": "Variety Female 1",
+      "type": "Variety",
+      "gender": "Female",
+      "file": "VARF1.pt",
+      "description": "Diverse female voice"
+    },
+    {
+      "id": "VARF2",
+      "name": "Variety Female 2",
+      "type": "Variety",
+      "gender": "Female",
+      "file": "VARF2.pt",
+      "description": "Diverse female voice"
+    },
+    {
+      "id": "VARF3",
+      "name": "Variety Female 3",
+      "type": "Variety",
+      "gender": "Female",
+      "file": "VARF3.pt",
+      "description": "Diverse female voice"
+    },
+    {
+      "id": "VARF4",
+      "name": "Variety Female 4",
+      "type": "Variety",
+      "gender": "Female",
+      "file": "VARF4.pt",
+      "description": "Diverse female voice"
+    },
+    {
+      "id": "VARM0",
+      "name": "Variety Male 0",
+      "type": "Variety",
+      "gender": "Male",
+      "file": "VARM0.pt",
+      "description": "Diverse male voice"
+    },
+    {
+      "id": "VARM1",
+      "name": "Variety Male 1",
+      "type": "Variety",
+      "gender": "Male",
+      "file": "VARM1.pt",
+      "description": "Diverse male voice"
+    },
+    {
+      "id": "VARM2",
+      "name": "Variety Male 2",
+      "type": "Variety",
+      "gender": "Male",
+      "file": "VARM2.pt",
+      "description": "Diverse male voice"
+    },
+    {
+      "id": "VARM3",
+      "name": "Variety Male 3",
+      "type": "Variety",
+      "gender": "Male",
+      "file": "VARM3.pt",
+      "description": "Diverse male voice"
+    },
+    {
+      "id": "VARM4",
+      "name": "Variety Male 4",
+      "type": "Variety",
+      "gender": "Male",
+      "file": "VARM4.pt",
+      "description": "Diverse male voice"
+    }
+  ]
+}

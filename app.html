@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PersonaPlex Desktop</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+            background: #0a0a0f;
+            color: #e2e8f0;
+            min-height: 100vh;
+        }
+        
+        .header {
+            padding: 1rem 2rem;
+            background: #1e293b;
+            border-bottom: 1px solid #334155;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .header h1 {
+            font-size: 1.25rem;
+            color: #60a5fa;
+        }
+        
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.875rem;
+            color: #94a3b8;
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #ef4444;
+        }
+        
+        .status-dot.connected {
+            background: #22c55e;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+        }
+        
+        .screen {
+            display: none;
+        }
+        
+        .screen.active {
+            display: block;
+        }
+        
+        .home-screen {
+            text-align: center;
+            padding: 4rem 2rem;
+        }
+        
+        .home-screen h2 {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            color: #e2e8f0;
+        }
+        
+        .home-screen p {
+            color: #94a3b8;
+            margin-bottom: 2rem;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        
+        .btn {
+            padding: 1rem 2rem;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 1rem;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin: 0.5rem;
+            transition: all 0.2s;
+        }
+        
+        .btn-primary {
+            background: #2563eb;
+            color: white;
+        }
+        
+        .btn-primary:hover {
+            background: #1d4ed8;
+        }
+        
+        .btn-secondary {
+            background: #334155;
+            color: white;
+        }
+        
+        .btn-secondary:hover {
+            background: #475569;
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .voice-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 2rem;
+        }
+        
+        .voice-card {
+            padding: 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            background: #1e293b;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+        }
+        
+        .voice-card:hover {
+            background: #334155;
+        }
+        
+        .voice-card.selected {
+            background: #1e40af;
+            border-color: #60a5fa;
+        }
+        
+        .voice-card h3 {
+            font-weight: bold;
+            margin-bottom: 0.25rem;
+        }
+        
+        .voice-card p {
+            font-size: 0.875rem;
+            color: #94a3b8;
+        }
+        
+        .presets {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+        
+        .preset-btn {
+            padding: 0.5rem 1rem;
+            background: #334155;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.875rem;
+        }
+        
+        .preset-btn:hover {
+            background: #475569;
+        }
+        
+        .preset-btn.active {
+            background: #1e40af;
+        }
+        
+        textarea {
+            width: 100%;
+            min-height: 150px;
+            padding: 0.75rem;
+            background: #1e293b;
+            color: #e2e8f0;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            resize: vertical;
+            font-family: inherit;
+        }
+        
+        .conversation-info {
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: #1e293b;
+            border-radius: 8px;
+        }
+        
+        .conversation-info div {
+            font-size: 0.875rem;
+            color: #94a3b8;
+            margin-bottom: 0.25rem;
+        }
+        
+        .transcript {
+            max-height: 400px;
+            overflow-y: auto;
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            background: #0f172a;
+            border-radius: 8px;
+        }
+        
+        .message {
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.75rem;
+        }
+        
+        .message-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.875rem;
+            flex-shrink: 0;
+        }
+        
+        .message-avatar.user {
+            background: #2563eb;
+        }
+        
+        .message-avatar.ai {
+            background: #059669;
+        }
+        
+        .message-content {
+            flex: 1;
+        }
+        
+        .message-sender {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            margin-bottom: 0.25rem;
+        }
+        
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+        }
+        
+        .control-btn {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            border: none;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.5rem;
+            transition: all 0.2s;
+        }
+        
+        .mic-btn {
+            background: #2563eb;
+            color: white;
+        }
+        
+        .mic-btn:hover {
+            background: #1d4ed8;
+        }
+        
+        .mic-btn.recording {
+            background: #dc2626;
+        }
+        
+        .stop-btn {
+            background: #475569;
+            color: white;
+        }
+        
+        .stop-btn:hover {
+            background: #64748b;
+        }
+        
+        .back-btn {
+            padding: 0.5rem 1rem;
+            background: #475569;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-bottom: 1rem;
+        }
+        
+        .error-message {
+            margin-top: 2rem;
+            padding: 1rem;
+            background: #451a1a;
+            border-radius: 8px;
+            color: #fca5a5;
+        }
+        
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0,0,0,0.8);
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+        }
+        
+        .modal.active {
+            display: flex;
+        }
+        
+        .modal-content {
+            background: #1e293b;
+            padding: 2rem;
+            border-radius: 8px;
+            max-width: 400px;
+            text-align: center;
+        }
+        
+        .modal-content h3 {
+            margin-bottom: 1rem;
+        }
+        
+        .modal-content p {
+            color: #94a3b8;
+            margin-bottom: 1.5rem;
+        }
+        
+        .modal-buttons {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+        }
+
+        .history-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        .history-item {
+            padding: 1rem;
+            background: #1e293b;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+
+        .history-item:hover {
+            background: #334155;
+        }
+
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+
+        .history-voice {
+            font-weight: bold;
+        }
+
+        .history-date {
+            color: #94a3b8;
+            font-size: 0.875rem;
+        }
+
+        .history-preview {
+            color: #94a3b8;
+            font-size: 0.875rem;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <h1>PersonaPlex Desktop</h1>
+        <div class="status">
+            <div class="status-dot" id="statusDot"></div>
+            <span id="statusText">Disconnected</span>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Home Screen -->
+        <div id="homeScreen" class="screen active">
+            <div class="home-screen">
+                <h2>Welcome to PersonaPlex</h2>
+                <p>Have real-time voice conversations with AI. Choose from 18 different voices and customize the persona to create unique conversational experiences.</p>
+                
+                <button class="btn btn-primary" onclick="showScreen('voice')" id="startBtn" disabled>
+                    ▶ Start New Conversation
+                </button>
+                <button class="btn btn-secondary" onclick="showScreen('history')">
+                    📋 View History
+                </button>
+
+                <div id="errorMessage" class="error-message" style="display: none;">
+                    ⚠️ Server not connected. Make sure the Python backend is running in WSL2 on port 8998.
+                </div>
+            </div>
+        </div>
+
+        <!-- Voice Selection Screen -->
+        <div id="voiceScreen" class="screen">
+            <button class="back-btn" onclick="showScreen('home')">← Back</button>
+            <h2 style="margin-bottom: 1.5rem; color: #60a5fa;">Select a Voice</h2>
+            
+            <div class="voice-grid" id="voiceGrid"></div>
+            
+            <button class="btn btn-primary" onclick="showScreen('persona')" id="continueBtn" disabled>
+                Continue
+            </button>
+        </div>
+
+        <!-- Persona Editor Screen -->
+        <div id="personaScreen" class="screen">
+            <button class="back-btn" onclick="showScreen('voice')">← Back</button>
+            <h2 style="margin-bottom: 1.5rem; color: #60a5fa;">Define the Persona</h2>
+            
+            <div style="margin-bottom: 1.5rem;">
+                <h3 style="font-size: 1rem; margin-bottom: 0.75rem; color: #94a3b8;">Quick Presets (click to apply):</h3>
+                <div class="presets" id="presets"></div>
+            </div>
+            
+            <div style="margin-bottom: 1.5rem;">
+                <h3 style="font-size: 1rem; margin-bottom: 0.5rem; color: #94a3b8;">Custom Persona Prompt:</h3>
+                <textarea id="personaText" placeholder="Describe the persona's personality, background, and behavior..."></textarea>
+            </div>
+            
+            <button class="btn btn-primary" onclick="startConversation()" id="startConversationBtn" disabled>
+                Start Conversation
+            </button>
+        </div>
+
+        <!-- Active Conversation Screen -->
+        <div id="conversationScreen" class="screen">
+            <div class="conversation-info">
+                <div>Voice: <span id="currentVoice"></span></div>
+                <div style="margin-top: 0.5rem; opacity: 0.7;">Persona: <span id="currentPersona"></span></div>
+            </div>
+
+            <div class="transcript" id="transcript">
+                <div style="text-align: center; color: #64748b; padding: 2rem;">
+                    Click the microphone to start speaking...
+                </div>
+            </div>
+
+            <div class="controls">
+                <button class="control-btn mic-btn" id="micBtn" onclick="toggleRecording()">🎤</button>
+                <button class="control-btn stop-btn" onclick="endConversation()">⏹</button>
+            </div>
+        </div>
+
+        <!-- History Screen -->
+        <div id="historyScreen" class="screen">
+            <button class="back-btn" onclick="showScreen('home')">← Back</button>
+            <h2 style="margin-bottom: 1.5rem; color: #60a5fa;">Conversation History</h2>
+            <div class="history-list" id="historyList"></div>
+        </div>
+    </div>
+
+    <!-- Save Modal -->
+    <div id="saveModal" class="modal">
+        <div class="modal-content">
+            <h3>Save Conversation?</h3>
+            <p>Would you like to save this conversation to your history?</p>
+            <div class="modal-buttons">
+                <button class="btn btn-secondary" onclick="dontSave()">Don't Save</button>
+                <button class="btn btn-primary" onclick="saveConversation()">💾 Save</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Configuration
+        const WS_URL = 'ws://localhost:8998';
+        
+        // Voice presets
+        const VOICE_PRESETS = [
+            { id: 'NATF0', name: 'Natural Female 0', type: 'Natural', gender: 'Female' },
+            { id: 'NATF1', name: 'Natural Female 1', type: 'Natural', gender: 'Female' },
+            { id: 'NATF2', name: 'Natural Female 2', type: 'Natural', gender: 'Female' },
+            { id: 'NATF3', name: 'Natural Female 3', type: 'Natural', gender: 'Female' },
+            { id: 'NATM0', name: 'Natural Male 0', type: 'Natural', gender: 'Male' },
+            { id: 'NATM1', name: 'Natural Male 1', type: 'Natural', gender: 'Male' },
+            { id: 'NATM2', name: 'Natural Male 2', type: 'Natural', gender: 'Male' },
+            { id: 'NATM3', name: 'Natural Male 3', type: 'Natural', gender: 'Male' },
+            { id: 'VARF0', name: 'Variety Female 0', type: 'Variety', gender: 'Female' },
+            { id: 'VARF1', name: 'Variety Female 1', type: 'Variety', gender: 'Female' },
+            { id: 'VARF2', name: 'Variety Female 2', type: 'Variety', gender: 'Female' },
+            { id: 'VARF3', name: 'Variety Female 3', type: 'Variety', gender: 'Female' },
+            { id: 'VARF4', name: 'Variety Female 4', type: 'Variety', gender: 'Female' },
+            { id: 'VARM0', name: 'Variety Male 0', type: 'Variety', gender: 'Male' },
+            { id: 'VARM1', name: 'Variety Male 1', type: 'Variety', gender: 'Male' },
+            { id: 'VARM2', name: 'Variety Male 2', type: 'Variety', gender: 'Male' },
+            { id: 'VARM3', name: 'Variety Male 3', type: 'Variety', gender: 'Male' },
+            { id: 'VARM4', name: 'Variety Male 4', type: 'Variety', gender: 'Male' },
+        ];
+
+        // Preset personas
+        const PRESETS = [
+            { name: 'Helpful Assistant', prompt: 'You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.' },
+            { name: 'Casual Conversation', prompt: 'You enjoy having a good conversation.' },
+            { name: 'Customer Service', prompt: 'You work for a customer service department. Be polite, helpful, and professional.' },
+            { name: 'Creative Writer', prompt: 'You are a creative writer with a vivid imagination. Tell engaging stories and use descriptive language.' }
+        ];
+
+        // State
+        let ws = null;
+        let selectedVoice = null;
+        let selectedPersona = '';
+        let isRecording = false;
+        let transcript = [];
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            connectWebSocket();
+            renderVoices();
+            renderPresets();
+        });
+
+        // WebSocket connection
+        function connectWebSocket() {
+            ws = new WebSocket(WS_URL);
+            
+            ws.onopen = () => {
+                console.log('Connected to server');
+                updateStatus(true);
+                document.getElementById('startBtn').disabled = false;
+                document.getElementById('errorMessage').style.display = 'none';
+            };
+            
+            ws.onclose = () => {
+                console.log('Disconnected from server');
+                updateStatus(false);
+                document.getElementById('startBtn').disabled = true;
+                document.getElementById('errorMessage').style.display = 'block';
+                
+                // Try to reconnect after 3 seconds
+                setTimeout(connectWebSocket, 3000);
+            };
+            
+            ws.onerror = (error) => {
+                console.error('WebSocket error:', error);
+            };
+            
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleMessage(data);
+            };
+        }
+
+        function updateStatus(connected) {
+            const dot = document.getElementById('statusDot');
+            const text = document.getElementById('statusText');
+            
+            if (connected) {
+                dot.classList.add('connected');
+                text.textContent = 'Connected';
+            } else {
+                dot.classList.remove('connected');
+                text.textContent = 'Disconnected';
+            }
+        }
+
+        function handleMessage(data) {
+            switch(data.type) {
+                case 'conversation_started':
+                    showScreen('conversation');
+                    break;
+                case 'transcript':
+                    addMessage(data.speaker, data.text);
+                    break;
+                case 'conversation_ended':
+                    showSaveModal();
+                    break;
+                case 'conversation_saved':
+                    alert('Conversation saved successfully!');
+                    break;
+                case 'voices_list':
+                    // Not used in this version
+                    break;
+                case 'history_list':
+                    renderHistory(data.conversations);
+                    break;
+                case 'error':
+                    console.error('Server error:', data.message);
+                    alert('Error: ' + data.message);
+                    break;
+            }
+        }
+
+        // Screen navigation
+        function showScreen(screenName) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(screenName + 'Screen').classList.add('active');
+            
+            if (screenName === 'history') {
+                loadHistory();
+            }
+        }
+
+        // Render voice cards
+        function renderVoices() {
+            const grid = document.getElementById('voiceGrid');
+            grid.innerHTML = VOICE_PRESETS.map(voice => `
+                <div class="voice-card" onclick="selectVoice('${voice.id}')" data-voice="${voice.id}">
+                    <h3>${voice.name}</h3>
+                    <p>${voice.type} • ${voice.gender}</p>
+                </div>
+            `).join('');
+        }
+
+        function selectVoice(voiceId) {
+            selectedVoice = voiceId;
+            document.querySelectorAll('.voice-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            document.querySelector(`[data-voice="${voiceId}"]`).classList.add('selected');
+            document.getElementById('continueBtn').disabled = false;
+        }
+
+        // Render presets
+        function renderPresets() {
+            const container = document.getElementById('presets');
+            container.innerHTML = PRESETS.map((preset, index) => `
+                <button class="preset-btn" onclick="applyPreset(${index})">${preset.name}</button>
+            `).join('');
+        }
+
+        function applyPreset(index) {
+            selectedPersona = PRESETS[index].prompt;
+            document.getElementById('personaText').value = selectedPersona;
+            
+            document.querySelectorAll('.preset-btn').forEach((btn, i) => {
+                btn.classList.toggle('active', i === index);
+            });
+            
+            document.getElementById('startConversationBtn').disabled = false;
+        }
+
+        document.getElementById('personaText').addEventListener('input', (e) => {
+            selectedPersona = e.target.value;
+            document.getElementById('startConversationBtn').disabled = !selectedPersona.trim();
+            document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
+        });
+
+        // Conversation functions
+        function startConversation() {
+            if (!selectedVoice || !selectedPersona.trim()) return;
+            
+            ws.send(JSON.stringify({
+                type: 'start_conversation',
+                voice: selectedVoice,
+                persona: selectedPersona
+            }));
+            
+            document.getElementById('currentVoice').textContent = selectedVoice;
+            document.getElementById('currentPersona').textContent = selectedPersona.substring(0, 100) + '...';
+            
+            transcript = [];
+            document.getElementById('transcript').innerHTML = '<div style="text-align: center; color: #64748b; padding: 2rem;">Click the microphone to start speaking...</div>';
+        }
+
+        function toggleRecording() {
+            const btn = document.getElementById('micBtn');
+            isRecording = !isRecording;
+            
+            if (isRecording) {
+                btn.classList.add('recording');
+                btn.textContent = '🔴';
+                // In a full implementation, this would start audio capture
+                // For now, we'll simulate with a text input
+                const text = prompt('Enter text to send (simulated audio):');
+                if (text) {
+                    addMessage('user', text);
+                    ws.send(JSON.stringify({
+                        type: 'audio_chunk',
+                        data: btoa(text) // Simulated base64 audio
+                    }));
+                }
+                toggleRecording(); // Stop recording
+            } else {
+                btn.classList.remove('recording');
+                btn.textContent = '🎤';
+            }
+        }
+
+        function addMessage(sender, text) {
+            transcript.push({ sender, text });
+            
+            const container = document.getElementById('transcript');
+            if (transcript.length === 1) {
+                container.innerHTML = '';
+            }
+            
+            const avatar = sender === 'user' ? 'U' : 'AI';
+            const className = sender === 'user' ? 'user' : 'ai';
+            const name = sender === 'user' ? 'You' : 'PersonaPlex';
+            
+            container.innerHTML += `
+                <div class="message">
+                    <div class="message-avatar ${className}">${avatar}</div>
+                    <div class="message-content">
+                        <div class="message-sender">${name}</div>
+                        <div>${text}</div>
+                    </div>
+                </div>
+            `;
+            
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function endConversation() {
+            ws.send(JSON.stringify({ type: 'end_conversation' }));
+        }
+
+        function showSaveModal() {
+            document.getElementById('saveModal').classList.add('active');
+        }
+
+        function saveConversation() {
+            ws.send(JSON.stringify({ type: 'save_conversation' }));
+            document.getElementById('saveModal').classList.remove('active');
+            showScreen('home');
+            resetConversation();
+        }
+
+        function dontSave() {
+            document.getElementById('saveModal').classList.remove('active');
+            showScreen('home');
+            resetConversation();
+        }
+
+        function resetConversation() {
+            selectedVoice = null;
+            selectedPersona = '';
+            isRecording = false;
+            transcript = [];
+            document.getElementById('personaText').value = '';
+            document.getElementById('continueBtn').disabled = true;
+            document.getElementById('startConversationBtn').disabled = true;
+            document.querySelectorAll('.voice-card').forEach(card => card.classList.remove('selected'));
+            document.querySelectorAll('.preset-btn').forEach(btn => btn.classList.remove('active'));
+        }
+
+        // History functions
+        function loadHistory() {
+            ws.send(JSON.stringify({ type: 'get_history', limit: 50 }));
+        }
+
+        function renderHistory(conversations) {
+            const container = document.getElementById('historyList');
+            
+            if (!conversations || conversations.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #64748b; padding: 3rem;">No conversations yet. Start one to see it here!</div>';
+                return;
+            }
+            
+            container.innerHTML = conversations.map(conv => `
+                <div class="history-item">
+                    <div class="history-header">
+                        <span class="history-voice">${conv.voice_preset}</span>
+                        <span class="history-date">${new Date(conv.created_at).toLocaleDateString()}</span>
+                    </div>
+                    <div class="history-preview">${conv.persona_preview}...</div>
+                </div>
+            `).join('');
+        }
+    </script>
+</body>
+</html>

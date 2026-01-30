@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+personaplex_server/venv/
+personaplex_server/personaplex/
+
+# Models (large files - not for git)
+personaplex_server/models/
+*.safetensors
+*.pt
+*.tgz
+
+# Build outputs
+dist/
+target/
+node_modules/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+conversations.db
+
+# Environment
+.env
+.env.local
+
+# Misc
+.conversations/
+.cache/
