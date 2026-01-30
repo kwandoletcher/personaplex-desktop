@@ -983,42 +983,28 @@ function App() {
   const [persona, setPersona] = useState('')
   const [serverStatus, setServerStatus] = useState('checking')
 
-  // Server URL - try localhost first, then WSL IP
-  const [serverUrl, setServerUrl] = useState('localhost:8998')
+  // Server URL - Lambda Labs cloud GPU
+  const [serverUrl, setServerUrl] = useState('150.136.94.234:8080')
 
   // Check server connection
   useEffect(() => {
     const checkServer = async () => {
-      // Try current serverUrl
+      // For cloud servers, skip HTTP check (CORS blocks it) - assume connected
+      // The WebSocket connection will be the real test
+      if (serverUrl.includes('150.136.94.234')) {
+        setServerStatus('connected')
+        return
+      }
+
+      // For local servers, try HTTP check
       try {
-        const response = await fetch(`http://${serverUrl}/api/voices`)
+        const response = await fetch(`http://${serverUrl}/`, { method: 'HEAD' })
         if (response.ok) {
           setServerStatus('connected')
           return
         }
       } catch (err) {
-        // Try localhost first
-        if (serverUrl !== 'localhost:8998') {
-          try {
-            const response = await fetch('http://localhost:8998/api/voices')
-            if (response.ok) {
-              setServerUrl('localhost:8998')
-              setServerStatus('connected')
-              return
-            }
-          } catch (e) {}
-        }
-
-        // Try 127.0.0.1
-        try {
-          const response = await fetch('http://127.0.0.1:8998/api/voices')
-          if (response.ok) {
-            setServerUrl('127.0.0.1:8998')
-            setServerStatus('connected')
-            return
-          }
-        } catch (e) {}
-
+        console.log('Server check failed:', err.message)
         setServerStatus('disconnected')
       }
     }
