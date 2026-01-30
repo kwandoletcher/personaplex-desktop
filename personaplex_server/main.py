@@ -390,10 +390,13 @@ def main():
 
     logger.info("Loading PersonaPlex model...")
     moshi_path = str(MODELS_DIR / "model.safetensors")
+    # Use cpu_offload=True to avoid meta tensor issues with PersonaPlex loader
+    # (A100 40GB has enough VRAM, accelerate will just put everything on GPU)
     lm = loaders.get_moshi_lm(
         moshi_path,
         device=device,
-        dtype=torch.bfloat16
+        dtype=torch.bfloat16,
+        cpu_offload=True
     )
     lm.eval()
     logger.info("PersonaPlex model loaded")
