@@ -1,167 +1,72 @@
 # PersonaPlex Desktop
 
-A native desktop application for NVIDIA's PersonaPlex voice AI, running locally on your RTX 5070 Ti.
+Real-time voice AI with 18 customizable voices, powered by NVIDIA PersonaPlex 7B.
 
 ## Features
 
-- ✅ **18 Built-in Voices**: 8 Natural voices (4 male, 4 female) + 10 Variety voices (5 male, 5 female)
-- ✅ **Custom Personas**: Create unique personalities with text prompts
-- ✅ **Real-time Conversations**: Full-duplex voice dialogue with interruption support
-- ✅ **Conversation History**: Save and review past conversations (optional)
-- ✅ **Offline Operation**: Complete privacy - runs entirely on your local machine
-- ✅ **Custom Voice Conditioning**: Upload your own voice samples (experimental)
+- **18 Voice Presets**: Natural (4 male, 4 female) + Variety (5 male, 5 female)
+- **Custom Persona Prompts**: Create unique AI personalities
+- **Full-Duplex Conversation**: Interruption support for natural dialogue
+- **Conversation History**: Save and review past conversations
+- **Cloud GPU Inference**: Lambda Labs A100 for real-time performance
+- **Microphone Settings**: Sensitivity control, noise suppression, echo cancellation
 
-## System Requirements
+## Quick Start
 
-- **GPU**: NVIDIA GeForce RTX 5070 Ti (16GB VRAM)
-- **RAM**: 64GB DDR5
-- **Storage**: 20GB+ free space for models
-- **OS**: Windows 11 Pro with WSL2
-- **Network**: Internet connection for initial model download only
+### 1. Start Cloud Server
 
-## Installation & Setup
-
-### Step 1: WSL2 Setup (One-time)
-
-The application requires WSL2 Ubuntu 24.04. If not already installed:
-
-```powershell
-# In PowerShell as Administrator
-wsl --install Ubuntu-24.04
+```bash
+ssh ubuntu@150.136.94.234
+cd ~/personaplex-models/personaplex-desktop/personaplex_server
+source ~/moshi-env/bin/activate
+python main.py --host 0.0.0.0 --port 8080
 ```
 
-### Step 2: Start the Python Backend
+### 2. Start Desktop App
 
-The Python server runs inside WSL2 and handles the AI model:
-
-```powershell
-# Open PowerShell and run:
-wsl
-
-# Navigate to the project
-cd /mnt/c/Users/User/Documents/moonshot/personaplex-desktop/personaplex_server
-
-# Activate virtual environment
-source venv/bin/activate
-
-# Set your HuggingFace token
-export HF_TOKEN='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'
-
-# Start the server
-python main.py
-```
-
-You should see:
-```
-✓ Server running on ws://0.0.0.0:8998
-```
-
-**Note**: First startup will download ~15GB of model files. This takes 10-20 minutes depending on your internet speed.
-
-### Step 3: Build & Run the Desktop App
-
-The desktop app is built with Tauri (Rust + React):
-
-```powershell
-# In a NEW PowerShell window (keep the server running in WSL)
+```bash
 cd C:\Users\User\Documents\moonshot\personaplex-desktop
-
-# Install Node.js dependencies
-npm install
-
-# Build and run the app
-npm run tauri-dev
+npm run tauri dev
 ```
 
-The app will open in a new window.
+## Usage
 
-## Usage Guide
+1. **Select Voice**: Choose from 18 voice presets using the dropdown
+2. **Set Persona**: Pick a preset or write a custom persona prompt
+3. **Adjust Mic**: Fine-tune sensitivity and toggle noise suppression/echo cancellation
+4. **Start**: Click "Start Conversation" and speak naturally
+5. **Interrupt**: Talk over the AI at any time - it will stop and respond
 
-### Starting a Conversation
+### Persona Examples
 
-1. **Select Voice**: Choose from 18 available voice presets
-   - Natural voices sound more conversational
-   - Variety voices offer more diversity
-
-2. **Define Persona**: Either:
-   - Click a preset (Helpful Assistant, Casual, Customer Service, Creative Writer)
-   - Write your own custom persona description
-
-3. **Start Talking**: Click the microphone button and speak naturally
-   - The AI will respond in real-time
-   - You can interrupt at any time
-
-4. **Save Conversation**: When finished, you'll be asked if you want to save it to history
-
-### Tips for Best Results
-
-**Persona Prompts**: Be specific about the persona's:
-- Role (teacher, customer service, friend, etc.)
-- Personality traits (friendly, professional, humorous)
-- Background knowledge (expert in certain topics)
-- Speaking style (formal, casual, technical)
-
-**Example prompts**:
 ```
-"You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way."
+"You are a wise and friendly teacher. Answer questions clearly."
 
-"You work for CitySan Services which is a waste management company. Your name is Ayelen. Be helpful and professional."
+"You work for customer service. Be polite and professional."
 
-"You enjoy having a good conversation. Have a casual discussion about eating at home versus dining out."
+"You enjoy casual conversation. Be friendly and engaging."
 ```
-
-### Voice Conditioning (Custom Voices)
-
-To use your own voice:
-1. Record a 5-10 second sample of your voice (24kHz, mono, WAV format)
-2. Place it in `personaplex_server/models/voices/custom_yourname.pt`
-3. Restart the server
-4. Your custom voice will appear in the voice selection
-
-**Note**: Voice conditioning requires technical setup (extracting embeddings). This feature is experimental.
-
-## Troubleshooting
-
-### "Server not connected" error
-
-1. Make sure WSL2 is running: `wsl --list --verbose`
-2. Ensure the Python server is running in WSL2
-3. Check firewall settings - port 8998 must be open
-
-### CUDA out of memory
-
-If you see OOM errors:
-1. Close other GPU-intensive applications
-2. The model automatically uses CPU offloading to fit in 16GB VRAM
-3. Consider closing browser tabs with heavy GPU usage
-
-### WSL2 audio not working
-
-If audio capture doesn't work:
-1. Install PulseAudio in WSL2: `sudo apt install pulseaudio`
-2. Configure Windows to share audio with WSL2
-3. Check microphone permissions in Windows Privacy settings
-
-### Model loading fails
-
-If the model won't load:
-1. Verify HF_TOKEN is set correctly
-2. Check you have 20GB+ free disk space
-3. Try deleting `personaplex_server/models/` and re-downloading
 
 ## Architecture
 
 ```
-┌─────────────────┐     ┌──────────────────┐     ┌─────────────────┐
-│  Desktop App    │────▶│  WebSocket API   │────▶│  PersonaPlex    │
-│  (Tauri/React)  │     │  (Port 8998)     │     │  Model (WSL2)   │
-└─────────────────┘     └──────────────────┘     └─────────────────┘
-                                                        │
-                                                        ▼
-                                                ┌─────────────────┐
-                                                │  RTX 5070 Ti    │
-                                                │  14GB VRAM used │
-                                                └─────────────────┘
+Desktop App (Tauri) --> WebSocket --> PersonaPlex Server (Lambda A100)
+                                              |
+                                              v
+                                      40GB VRAM (A100)
+                                      17GB Model + KV Cache
+```
+
+## Server Management
+
+**Lambda Labs bills hourly** - terminate instances when not in use.
+
+Model files persist on Lambda filesystem (no re-download needed).
+
+### Server Dependencies
+
+```bash
+pip install aiohttp sphn safetensors sentencepiece accelerate
 ```
 
 ## Development
@@ -170,54 +75,84 @@ If the model won't load:
 
 ```
 personaplex-desktop/
-├── personaplex_server/      # Python backend (WSL2)
-│   ├── main.py              # WebSocket server
-│   ├── models/              # AI model files
-│   └── voices/              # Voice embeddings
-├── src/                     # React frontend
-│   ├── App.jsx              # Main application
+├── src/
+│   ├── App.jsx              # Main application (compact left panel)
 │   └── main.jsx             # Entry point
-├── src-tauri/               # Rust/Tauri backend
-│   └── src/main.rs          # Desktop shell
-└── conversations/           # Saved conversation history
+├── src-tauri/
+│   └── src/main.rs          # Tauri backend
+├── personaplex_server/
+│   ├── main.py              # WebSocket server
+│   └── models/voices/       # Voice embeddings
+└── public/assets/           # Opus encoder/decoder workers
 ```
 
-### Adding New Features
+### Key Components
 
-**To add a new voice preset**:
-1. Add voice file to `personaplex_server/models/voices/`
-2. Update `VOICE_PRESETS` in `src/App.jsx`
+- **VoiceDropdown**: Compact voice selection
+- **PersonaInput**: Preset chips + custom textarea
+- **MicSettings**: Sensitivity slider + NS/EC toggles
+- **TranscriptList**: Scrolling conversation display
+- **AudioLevelMeter**: Real-time mic level visualization
 
-**To modify the AI behavior**:
-1. Edit `personaplex_server/main.py`
-2. The server handles all model inference
+## Roadmap
 
-**To change the UI**:
-1. Edit React components in `src/`
-2. Run `npm run tauri-dev` to see changes
+### v1.1 - Current Sprint
+- [x] Cloud GPU deployment (Lambda Labs A100)
+- [x] 18 voice presets working
+- [x] UI redesign (compact left panel)
+- [x] Transcript bug fix
+- [x] Microphone settings UI
+- [ ] Wispr Flow integration for user speech
+
+### v1.2 - Enhanced Audio
+- [ ] Noise gate option
+- [ ] Voice activity detection tuning
+- [ ] Audio device selection
+
+### v2.0 - Virtual Audio Device
+- [ ] VB-Cable integration
+- [ ] Route AI voice to Discord/Zoom/etc
+- [ ] Voice changer mode
+- [ ] Real-time voice modification
+
+### v3.0 - B2B Applications
+- [ ] Headless API mode
+- [ ] CRM webhooks (Salesforce, HubSpot)
+- [ ] Call analytics & transcripts
+- [ ] Multi-agent conversations
+- [ ] Auto-dialer integration
+
+## Troubleshooting
+
+### "Server not connected"
+1. Verify Lambda Labs instance is running
+2. SSH in and check if `python main.py` is running
+3. Check firewall allows port 8080
+
+### Audio issues
+1. Check microphone permissions in Windows
+2. Adjust sensitivity slider if input is too quiet/loud
+3. Toggle noise suppression off if voice is being filtered
+
+### WebSocket connection drops
+- Lambda may timeout after inactivity
+- Restart the server: `python main.py --host 0.0.0.0 --port 8080`
 
 ## Performance
 
-- **Model Size**: 7B parameters (~15GB on disk)
-- **VRAM Usage**: ~14GB with CPU offloading
+- **Model Size**: 7B parameters (~17GB VRAM)
+- **GPU**: NVIDIA A100 (40GB)
 - **Latency**: ~200-400ms response time
 - **Sample Rate**: 24kHz audio I/O
 
 ## License
 
-This project uses:
 - PersonaPlex model: [NVIDIA Open Model License](https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-open-model-license/)
 - Moshi architecture: MIT License
 - Desktop application: MIT License
-
-## Support
-
-For issues with:
-- **Model behavior**: See [NVIDIA PersonaPlex GitHub](https://github.com/NVIDIA/personaplex)
-- **This application**: Open an issue in this repository
 
 ## Acknowledgments
 
 - NVIDIA for creating PersonaPlex
 - Kyutai for the Moshi architecture
-- PyTorch team for CUDA 13.0 support
+- Lambda Labs for cloud GPU infrastructure

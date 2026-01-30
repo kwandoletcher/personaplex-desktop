@@ -416,6 +416,27 @@ class ServerState:
             conversations = self.storage.list_conversations(limit, offset)
             return web.json_response({"conversations": conversations})
 
+        elif action == 'save':
+            # Handle POST request to save conversation
+            if request.method != 'POST':
+                return web.json_response({"error": "Method not allowed"}, status=405)
+            try:
+                data = await request.json()
+                voice_preset = data.get('voice_preset', 'unknown')
+                persona_prompt = data.get('persona_prompt', '')
+                transcript = data.get('transcript', [])
+
+                conv_id = self.storage.save_conversation(
+                    voice_preset=voice_preset,
+                    persona_prompt=persona_prompt,
+                    transcript=transcript
+                )
+                logger.info(f"Saved conversation {conv_id}")
+                return web.json_response({"id": conv_id, "success": True})
+            except Exception as e:
+                logger.error(f"Failed to save conversation: {e}")
+                return web.json_response({"error": str(e)}, status=500)
+
         return web.json_response({"error": "Unknown action"}, status=400)
 
 
@@ -482,6 +503,7 @@ def main():
     app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/api/chat", state.handle_chat)
     app.router.add_get("/api/{action}", state.handle_api)
+    app.router.add_post("/api/{action}", state.handle_api)
 
     logger.info(f"Starting server on {args.host}:{args.port}")
     logger.info(f"WebSocket endpoint: ws://{args.host}:{args.port}/api/chat")
