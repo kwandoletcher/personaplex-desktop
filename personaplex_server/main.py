@@ -268,8 +268,6 @@ class ServerState:
         peer = request.remote
         logger.info(f"Incoming connection from {peer}")
 
-        # Note: Voice prompt and text prompt are logged but not currently applied
-        # (moshi 0.2.12 API doesn't support the old voice embedding format)
         voice_prompt = request.query.get("voice_prompt", "default")
         text_prompt = request.query.get("text_prompt", "")
         logger.info(f"Requested voice: {voice_prompt}, persona length: {len(text_prompt)}")
@@ -280,6 +278,33 @@ class ServerState:
 
             self.mimi.reset_streaming()
             self.lm_gen.reset_streaming()
+
+            # Load voice prompt embeddings if available (requires PersonaPlex moshi)
+            voice_applied = False
+            if voice_prompt and voice_prompt != "default":
+                voice_path = Path(self.voice_prompt_dir) / voice_prompt
+                if voice_path.exists():
+                    try:
+                        # PersonaPlex API: load_voice_prompt_embeddings for .pt files
+                        if hasattr(self.lm_gen, 'load_voice_prompt_embeddings'):
+                            self.lm_gen.load_voice_prompt_embeddings(str(voice_path))
+                            logger.info(f"Loaded voice embeddings: {voice_prompt}")
+
+                            # Apply system prompts (voice conditioning)
+                            if hasattr(self.lm_gen, 'step_system_prompts'):
+                                self.lm_gen.step_system_prompts(self.mimi)
+                                self.mimi.reset_streaming()  # Reset after voice prompt encoding
+                                logger.info("Applied voice conditioning via step_system_prompts")
+                                voice_applied = True
+                        else:
+                            logger.warning("Voice prompts not supported (need PersonaPlex moshi)")
+                    except Exception as e:
+                        logger.error(f"Failed to load voice prompt: {e}")
+                else:
+                    logger.warning(f"Voice file not found: {voice_path}")
+
+            if not voice_applied:
+                logger.info("Using default voice (no voice conditioning)")
 
             # Send handshake
             await ws.send_bytes(bytes([MSG_HANDSHAKE]))

@@ -528,6 +528,7 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
 
   // Ref for synchronous text accumulation (fixes disappearing text bug)
   const currentTextRef = useRef('')
+  const textCommitTimeoutRef = useRef(null)  // Timeout to commit text after pause
 
   const socketRef = useRef(null)
   const recorderRef = useRef(null)
@@ -875,6 +876,12 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
             break
 
           case 'text':
+            // Clear any pending commit timeout
+            if (textCommitTimeoutRef.current) {
+              clearTimeout(textCommitTimeoutRef.current)
+              textCommitTimeoutRef.current = null
+            }
+
             // Accumulate text using ref for synchronous access
             currentTextRef.current += message.data
             setCurrentText(currentTextRef.current)
@@ -888,6 +895,19 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
               }])
               currentTextRef.current = ''
               setCurrentText('')
+            } else {
+              // Set a timeout to commit text after 1.5s pause (no more text arriving)
+              textCommitTimeoutRef.current = setTimeout(() => {
+                if (currentTextRef.current.trim()) {
+                  setTranscript(prev => [...prev, {
+                    speaker: 'ai',
+                    text: currentTextRef.current.trim(),
+                    timestamp: new Date()
+                  }])
+                  currentTextRef.current = ''
+                  setCurrentText('')
+                }
+              }, 1500)
             }
             setIsSpeaking(true)
             break
@@ -904,6 +924,11 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
 
       socket.onclose = () => {
         if (!mounted) return
+        // Clear any pending text commit timeout
+        if (textCommitTimeoutRef.current) {
+          clearTimeout(textCommitTimeoutRef.current)
+          textCommitTimeoutRef.current = null
+        }
         // Save any remaining text to transcript
         if (currentTextRef.current.trim()) {
           setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
@@ -925,6 +950,11 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
 
     return () => {
       mounted = false
+      // Clear text commit timeout
+      if (textCommitTimeoutRef.current) {
+        clearTimeout(textCommitTimeoutRef.current)
+        textCommitTimeoutRef.current = null
+      }
 
       stopRecording()
 
@@ -1623,6 +1653,7 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
   const [errorMessage, setErrorMessage] = useState(null)
 
   const currentTextRef = useRef('')
+  const textCommitTimeoutRef = useRef(null)  // Timeout to commit text after pause
   const socketRef = useRef(null)
   const recorderRef = useRef(null)
   const audioContextRef = useRef(null)
@@ -1863,12 +1894,29 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
             }
             break
           case 'text':
+            // Clear any pending commit timeout
+            if (textCommitTimeoutRef.current) {
+              clearTimeout(textCommitTimeoutRef.current)
+              textCommitTimeoutRef.current = null
+            }
+
             currentTextRef.current += message.data
             setCurrentText(currentTextRef.current)
+
+            // If text ends with sentence punctuation, commit immediately
             if (currentTextRef.current.match(/[.!?]\s*$/)) {
               setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
               currentTextRef.current = ''
               setCurrentText('')
+            } else {
+              // Set a timeout to commit text after 1.5s pause (no more text arriving)
+              textCommitTimeoutRef.current = setTimeout(() => {
+                if (currentTextRef.current.trim()) {
+                  setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
+                  currentTextRef.current = ''
+                  setCurrentText('')
+                }
+              }, 1500)
             }
             setIsSpeaking(true)
             break
@@ -1881,6 +1929,11 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
 
       socket.onclose = () => {
         if (!mounted) return
+        // Clear any pending text commit timeout
+        if (textCommitTimeoutRef.current) {
+          clearTimeout(textCommitTimeoutRef.current)
+          textCommitTimeoutRef.current = null
+        }
         // Save any remaining text to transcript
         if (currentTextRef.current.trim()) {
           setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
@@ -1897,6 +1950,11 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
 
     return () => {
       mounted = false
+      // Clear text commit timeout
+      if (textCommitTimeoutRef.current) {
+        clearTimeout(textCommitTimeoutRef.current)
+        textCommitTimeoutRef.current = null
+      }
       stopRecording()
       if (socketRef.current) { socketRef.current.close(); socketRef.current = null }
       if (decoderWorkerRef.current) { decoderWorkerRef.current.terminate(); decoderWorkerRef.current = null }

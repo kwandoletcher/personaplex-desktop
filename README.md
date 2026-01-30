@@ -63,11 +63,47 @@ Desktop App (Tauri) --> WebSocket --> PersonaPlex Server (Lambda A100)
 
 Model files persist on Lambda filesystem (no re-download needed).
 
+### Server Setup (First Time)
+
+**IMPORTANT:** Must install PersonaPlex's modified moshi library (NOT PyPI moshi).
+
+```bash
+# SSH to server
+ssh ubuntu@150.136.94.234
+
+# Clone PersonaPlex repo (includes modified moshi library)
+git clone https://github.com/NVIDIA/personaplex.git ~/personaplex
+
+# Create/activate environment
+python -m venv ~/moshi-env
+source ~/moshi-env/bin/activate
+
+# Install PersonaPlex moshi (enables voice embeddings)
+cd ~/personaplex
+pip install moshi/.
+
+# Install additional dependencies
+pip install aiohttp sphn safetensors sentencepiece accelerate
+
+# Copy server files
+mkdir -p ~/personaplex-models/personaplex-desktop/personaplex_server
+# (Copy main.py and models/ from this repo)
+
+# Download model files to models/ directory
+# - tokenizer-e351c8d8-checkpoint125.safetensors (Mimi codec)
+# - model.safetensors (PersonaPlex 7B)
+# - tokenizer_spm_32k_3.model (text tokenizer)
+# - voices/*.pt (18 voice embeddings)
+```
+
 ### Server Dependencies
 
 ```bash
 pip install aiohttp sphn safetensors sentencepiece accelerate
 ```
+
+**Note:** The standard `pip install moshi` from PyPI does NOT include voice conditioning.
+You must install from PersonaPlex's repo for voice selection to work.
 
 ## Development
 
@@ -98,10 +134,11 @@ personaplex-desktop/
 
 ### v1.1 - Current Sprint
 - [x] Cloud GPU deployment (Lambda Labs A100)
-- [x] 18 voice presets working
 - [x] UI redesign (compact left panel)
-- [x] Transcript bug fix
+- [x] Transcript bug fix (timeout-based commit for text without punctuation)
 - [x] Microphone settings UI
+- [x] Voice selection UI (18 presets)
+- [ ] Voice embeddings active (requires PersonaPlex moshi on server)
 - [ ] Wispr Flow integration for user speech
 
 ### v1.2 - Enhanced Audio
@@ -137,6 +174,12 @@ personaplex-desktop/
 ### WebSocket connection drops
 - Lambda may timeout after inactivity
 - Restart the server: `python main.py --host 0.0.0.0 --port 8080`
+
+### Voice selection not working (all voices sound the same)
+This happens when using PyPI moshi instead of PersonaPlex moshi:
+1. Check server logs for "Voice prompts not supported (need PersonaPlex moshi)"
+2. Install PersonaPlex moshi: `cd ~/personaplex && pip install moshi/.`
+3. Restart the server
 
 ## Performance
 
