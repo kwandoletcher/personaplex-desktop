@@ -164,16 +164,22 @@ class ServerState:
     def warmup(self):
         """Warmup the model with dummy frames."""
         logger.info("Warming up model...")
+        # Mimi is on CPU, LMGen is on GPU
+        mimi_device = next(self.mimi.parameters()).device
         for _ in range(4):
-            chunk = torch.zeros(1, 1, self.frame_size, dtype=torch.float32, device=self.device)
+            chunk = torch.zeros(1, 1, self.frame_size, dtype=torch.float32, device=mimi_device)
             codes = self.mimi.encode(chunk)
             _ = self.other_mimi.encode(chunk)
             for c in range(codes.shape[-1]):
-                tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                # Move codes to GPU for LMGen
+                codes_gpu = codes[:, :, c: c + 1].to(self.device)
+                tokens = self.lm_gen.step(codes_gpu)
                 if tokens is None:
                     continue
-                _ = self.mimi.decode(tokens[:, 1:9])
-                _ = self.other_mimi.decode(tokens[:, 1:9])
+                # Move tokens back to CPU for Mimi decode
+                tokens_cpu = tokens.cpu()
+                _ = self.mimi.decode(tokens_cpu[:, 1:9])
+                _ = self.other_mimi.decode(tokens_cpu[:, 1:9])
 
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
@@ -247,6 +253,8 @@ class ServerState:
             nonlocal close
             all_pcm_data = None
             frame_count = 0
+            # Mimi is on CPU, LMGen is on GPU
+            mimi_device = next(self.mimi.parameters()).device
 
             while not close:
                 await asyncio.sleep(0.001)
@@ -268,20 +276,22 @@ class ServerState:
                     chunk = all_pcm_data[:self.frame_size]
                     all_pcm_data = all_pcm_data[self.frame_size:]
 
-                    chunk_tensor = torch.from_numpy(chunk)
-                    chunk_tensor = chunk_tensor.to(device=self.device)[None, None]
-
+                    # Mimi encode on CPU
+                    chunk_tensor = torch.from_numpy(chunk)[None, None]  # Shape: [1, 1, frame_size]
                     codes = self.mimi.encode(chunk_tensor)
                     _ = self.other_mimi.encode(chunk_tensor)
 
                     for c in range(codes.shape[-1]):
-                        tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                        # Move codes to GPU for LMGen
+                        codes_gpu = codes[:, :, c: c + 1].to(self.device)
+                        tokens = self.lm_gen.step(codes_gpu)
                         if tokens is None:
                             continue
 
-                        main_pcm = self.mimi.decode(tokens[:, 1:9])
-                        _ = self.other_mimi.decode(tokens[:, 1:9])
-                        main_pcm = main_pcm.cpu()
+                        # Move tokens to CPU for Mimi decode
+                        tokens_cpu = tokens.cpu()
+                        main_pcm = self.mimi.decode(tokens_cpu[:, 1:9])
+                        _ = self.other_mimi.decode(tokens_cpu[:, 1:9])
                         opus_writer.append_pcm(main_pcm[0, 0].numpy())
 
                         text_token = tokens[0, 0, 0].item()
@@ -388,11 +398,11 @@ def main():
 
     from moshi.models import loaders
 
-    logger.info("Loading Mimi audio codec...")
+    logger.info("Loading Mimi audio codec (on CPU to save VRAM)...")
     mimi_path = str(MODELS_DIR / "tokenizer-e351c8d8-checkpoint125.safetensors")
-    mimi = loaders.get_mimi(mimi_path, device)
-    other_mimi = loaders.get_mimi(mimi_path, device)
-    logger.info("Mimi loaded")
+    mimi = loaders.get_mimi(mimi_path, 'cpu')
+    other_mimi = loaders.get_mimi(mimi_path, 'cpu')
+    logger.info("Mimi loaded on CPU")
 
     logger.info("Loading text tokenizer...")
     text_tokenizer = sentencepiece.SentencePieceProcessor()
@@ -403,6 +413,11 @@ def main():
     lm = loaders.get_moshi_lm(moshi_path, device=device, cpu_offload=args.cpu_offload)
     lm.eval()
     logger.info("PersonaPlex model loaded")
+
+    # Reduce context window to fit in 16GB VRAM
+    logger.info("Reducing context window to 1500 tokens to conserve VRAM...")
+    from moshi.modules.transformer import set_attention_context
+    set_attention_context(lm, 1500)
 
     voice_prompt_dir = str(MODELS_DIR / "voices")
 
