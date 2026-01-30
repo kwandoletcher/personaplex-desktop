@@ -174,99 +174,8 @@ class ServerState:
         torch.cuda.synchronize()
         logger.info("Warmup complete")
 
-    async def decode_and_send(self, tokens: torch.Tensor, ws: web.WebSocketResponse,
-                              opus_writer: sphn.OpusStreamWriter):
-        """Decode tokens to audio and send via WebSocket."""
-        main_pcm = self.mimi.decode(tokens[:, 1:])
-        main_pcm = main_pcm.cpu()
-        # sphn 0.1.x: append_pcm buffers, read_bytes returns encoded data
-        opus_writer.append_pcm(main_pcm[0, 0].numpy())
-        opus_bytes = opus_writer.read_bytes()
-        if opus_bytes is not None and len(opus_bytes) > 0:
-            await ws.send_bytes(bytes([MSG_AUDIO]) + opus_bytes)
-
-        text_token = tokens[0, 0, 0].item()
-        if text_token not in (0, 3):
-            text_piece = self.text_tokenizer.id_to_piece(text_token)
-            text_piece = text_piece.replace("▁", " ")
-            await ws.send_bytes(bytes([MSG_TEXT]) + text_piece.encode('utf-8'))
-
-    async def recv_loop(self, ws: web.WebSocketResponse,
-                        opus_reader: sphn.OpusStreamReader,
-                        opus_writer: sphn.OpusStreamWriter):
-        """Main receive and process loop."""
-        all_pcm_data = None
-        skip_frames = 1
-        frame_count = 0
-
-        try:
-            async for message in ws:
-                if message.type == aiohttp.WSMsgType.ERROR:
-                    logger.error(f"WebSocket error: {ws.exception()}")
-                    break
-                elif message.type == aiohttp.WSMsgType.CLOSED:
-                    break
-                elif message.type != aiohttp.WSMsgType.BINARY:
-                    logger.warning(f"Unexpected message type: {message.type}")
-                    continue
-
-                data = message.data
-                if not isinstance(data, bytes) or len(data) == 0:
-                    continue
-
-                kind = data[0]
-                payload = data[1:]
-
-                if kind == MSG_AUDIO:
-                    # Buffer the opus data
-                    opus_reader.append_bytes(payload)
-                    # Read decoded PCM (separate call)
-                    pcm = opus_reader.read_pcm()
-                    if pcm is None or pcm.shape[-1] == 0:
-                        continue
-
-                    if all_pcm_data is None:
-                        all_pcm_data = pcm
-                    else:
-                        all_pcm_data = np.concatenate((all_pcm_data, pcm))
-
-                    while all_pcm_data.shape[-1] >= self.frame_size:
-                        frame_count += 1
-                        if frame_count <= 5:
-                            logger.info(f"Processing frame {frame_count}")
-
-                        be = time.time()
-                        chunk = all_pcm_data[:self.frame_size]
-                        all_pcm_data = all_pcm_data[self.frame_size:]
-
-                        chunk_tensor = torch.from_numpy(chunk).to(device=self.device)[None, None]
-                        codes = self.mimi.encode(chunk_tensor)
-
-                        if skip_frames:
-                            # First frame is in the past from model's perspective
-                            self.mimi.reset_streaming()
-                            skip_frames -= 1
-
-                        for c in range(codes.shape[-1]):
-                            tokens = self.lm_gen.step(codes[:, :, c: c + 1])
-                            if tokens is None:
-                                continue
-                            await self.decode_and_send(tokens, ws, opus_writer)
-
-                        logger.debug(f"Frame handled in {1000 * (time.time() - be):.1f}ms")
-
-                elif kind == MSG_CONTROL:
-                    logger.info(f"Control message: {payload}")
-                elif kind == MSG_METADATA:
-                    logger.info(f"Metadata: {payload.decode('utf-8', errors='replace')}")
-                else:
-                    logger.warning(f"Unknown message kind: {kind}")
-
-        finally:
-            logger.info(f"Connection closed after {frame_count} frames")
-
     async def handle_chat(self, request):
-        """Handle a WebSocket chat connection."""
+        """Handle a WebSocket chat connection with concurrent loops."""
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 
@@ -277,6 +186,94 @@ class ServerState:
         text_prompt = request.query.get("text_prompt", "")
         logger.info(f"Requested voice: {voice_prompt}, persona length: {len(text_prompt)}")
 
+        close = False
+
+        async def recv_loop(opus_reader):
+            """Receive WebSocket messages and buffer audio data."""
+            nonlocal close
+            async for message in ws:
+                if message.type == aiohttp.WSMsgType.ERROR:
+                    logger.error(f"WebSocket error: {ws.exception()}")
+                    break
+                elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                    break
+                elif message.type != aiohttp.WSMsgType.BINARY:
+                    continue
+
+                data = message.data
+                if not isinstance(data, bytes) or len(data) == 0:
+                    continue
+
+                kind = data[0]
+                payload = data[1:]
+
+                if kind == MSG_AUDIO:
+                    opus_reader.append_bytes(payload)
+                elif kind == MSG_CONTROL:
+                    logger.info(f"Control message: {payload}")
+
+            close = True
+            logger.info("Receive loop ended")
+
+        async def process_loop(opus_reader, opus_writer):
+            """Process audio through the model."""
+            nonlocal close
+            all_pcm_data = None
+            frame_count = 0
+
+            while not close:
+                await asyncio.sleep(0.001)  # Yield to other tasks
+                pcm = opus_reader.read_pcm()
+
+                if pcm is None or pcm.shape[-1] == 0:
+                    continue
+
+                if all_pcm_data is None:
+                    all_pcm_data = pcm
+                else:
+                    all_pcm_data = np.concatenate((all_pcm_data, pcm))
+
+                while all_pcm_data.shape[-1] >= self.frame_size:
+                    frame_count += 1
+                    if frame_count <= 5:
+                        logger.info(f"Processing frame {frame_count}")
+
+                    chunk = all_pcm_data[:self.frame_size]
+                    all_pcm_data = all_pcm_data[self.frame_size:]
+
+                    chunk_tensor = torch.from_numpy(chunk).to(device=self.device)[None, None]
+                    codes = self.mimi.encode(chunk_tensor)
+
+                    for c in range(codes.shape[-1]):
+                        tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                        if tokens is None:
+                            continue
+
+                        # Decode audio
+                        main_pcm = self.mimi.decode(tokens[:, 1:])
+                        main_pcm = main_pcm.cpu()
+                        opus_writer.append_pcm(main_pcm[0, 0].numpy())
+
+                        # Send text token
+                        text_token = tokens[0, 0, 0].item()
+                        if text_token not in (0, 3):
+                            text_piece = self.text_tokenizer.id_to_piece(text_token)
+                            text_piece = text_piece.replace("▁", " ")
+                            await ws.send_bytes(bytes([MSG_TEXT]) + text_piece.encode('utf-8'))
+
+            logger.info(f"Process loop ended after {frame_count} frames")
+
+        async def send_loop(opus_writer):
+            """Send encoded audio back to client."""
+            nonlocal close
+            while not close:
+                await asyncio.sleep(0.001)  # Yield to other tasks
+                opus_bytes = opus_writer.read_bytes()
+                if opus_bytes is not None and len(opus_bytes) > 0:
+                    await ws.send_bytes(bytes([MSG_AUDIO]) + opus_bytes)
+
+            logger.info("Send loop ended")
+
         async with self.lock:
             opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
             opus_reader = sphn.OpusStreamReader(self.mimi.sample_rate)
@@ -284,40 +281,43 @@ class ServerState:
             self.mimi.reset_streaming()
             self.lm_gen.reset_streaming()
 
-            # Load voice prompt embeddings if available (requires PersonaPlex moshi)
-            voice_applied = False
+            # Load voice prompt embeddings if available
             if voice_prompt and voice_prompt != "default":
                 voice_path = Path(self.voice_prompt_dir) / voice_prompt
                 if voice_path.exists():
                     try:
-                        # PersonaPlex API: load_voice_prompt_embeddings for .pt files
                         if hasattr(self.lm_gen, 'load_voice_prompt_embeddings'):
                             self.lm_gen.load_voice_prompt_embeddings(str(voice_path))
                             logger.info(f"Loaded voice embeddings: {voice_prompt}")
 
-                            # Apply system prompts (voice conditioning)
                             if hasattr(self.lm_gen, 'step_system_prompts'):
                                 self.lm_gen.step_system_prompts(self.mimi)
-                                self.mimi.reset_streaming()  # Reset after voice prompt encoding
-                                logger.info("Applied voice conditioning via step_system_prompts")
-                                voice_applied = True
-                        else:
-                            logger.warning("Voice prompts not supported (need PersonaPlex moshi)")
+                                self.mimi.reset_streaming()
+                                logger.info("Applied voice conditioning")
                     except Exception as e:
                         logger.error(f"Failed to load voice prompt: {e}")
-                else:
-                    logger.warning(f"Voice file not found: {voice_path}")
-
-            if not voice_applied:
-                logger.info("Using default voice (no voice conditioning)")
 
             # Send handshake
             await ws.send_bytes(bytes([MSG_HANDSHAKE]))
-            logger.info("Sent handshake, starting audio processing")
+            logger.info("Sent handshake, starting concurrent audio loops")
 
-            await self.recv_loop(ws, opus_reader, opus_writer)
+            # Run three concurrent loops
+            tasks = [
+                asyncio.create_task(recv_loop(opus_reader)),
+                asyncio.create_task(process_loop(opus_reader, opus_writer)),
+                asyncio.create_task(send_loop(opus_writer)),
+            ]
 
-        logger.info("Done with connection")
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        logger.info("Connection closed")
         return ws
 
     async def handle_api(self, request):
