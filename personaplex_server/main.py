@@ -1,43 +1,71 @@
 #!/usr/bin/env python3
 """
-PersonaPlex Desktop - Python Backend Server
-Handles model inference, WebSocket communication, and audio streaming
+PersonaPlex Desktop - Real-Time Full-Duplex Streaming Server
+Matches the original PersonaPlex/Moshi binary protocol exactly.
+
+Binary Protocol:
+  0x00 = handshake (server sends when ready)
+  0x01 = audio (followed by Opus bytes)
+  0x02 = text (followed by UTF-8 text)
+  0x03 = control message
+  0x04 = metadata (JSON)
+  0x05 = error
 """
+
+import os
+os.environ['TORCH_COMPILE_DISABLE'] = '1'
+os.environ['NO_TORCH_COMPILE'] = '1'
+os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 import asyncio
 import json
-import base64
 import sqlite3
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any, AsyncIterator
-from dataclasses import dataclass, asdict
-from contextlib import asynccontextmanager
+from typing import Optional, Dict, Callable
+from dataclasses import dataclass
 
 import numpy as np
 import torch
-import websockets
-from websockets.server import WebSocketServerProtocol
+import aiohttp
+from aiohttp import web
+import sphn
+import sentencepiece
 
-# Configure logging
+torch._dynamo.config.disable = True
+torch._dynamo.reset()
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Constants
 SAMPLE_RATE = 24000
-CHUNK_DURATION = 0.1  # 100ms chunks
-CHUNK_SAMPLES = int(SAMPLE_RATE * CHUNK_DURATION)
+FRAME_RATE = 12.5
+FRAME_SIZE = int(SAMPLE_RATE / FRAME_RATE)
 DB_PATH = Path(__file__).parent / "conversations.db"
 MODELS_DIR = Path(__file__).parent / "models"
+
+MSG_HANDSHAKE = 0x00
+MSG_AUDIO = 0x01
+MSG_TEXT = 0x02
+MSG_CONTROL = 0x03
+MSG_METADATA = 0x04
+MSG_ERROR = 0x05
+
+
+def wrap_with_system_tags(text: str) -> str:
+    """Add system tags as the model expects."""
+    cleaned = text.strip()
+    if cleaned.startswith("<system>") and cleaned.endswith("<system>"):
+        return cleaned
+    return f"<system> {cleaned} <system>"
 
 
 @dataclass
 class Conversation:
-    """Represents a conversation session"""
     id: int
     created_at: str
     voice_preset: str
@@ -48,14 +76,11 @@ class Conversation:
 
 
 class StorageManager:
-    """Manages conversation storage in SQLite"""
-    
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         self._init_db()
-    
+
     def _init_db(self):
-        """Initialize database schema"""
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS conversations (
@@ -68,63 +93,29 @@ class StorageManager:
                     duration_seconds REAL
                 )
             """)
-            
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
             conn.commit()
-    
-    def save_conversation(self, voice_preset: str, persona_prompt: str, 
+
+    def save_conversation(self, voice_preset: str, persona_prompt: str,
                          transcript: list, audio_path: Optional[str] = None,
                          duration_seconds: float = 0.0) -> int:
-        """Save a conversation to database"""
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute(
-                """INSERT INTO conversations 
+                """INSERT INTO conversations
                    (voice_preset, persona_prompt, transcript, audio_path, duration_seconds)
                    VALUES (?, ?, ?, ?, ?)""",
-                (voice_preset, persona_prompt, json.dumps(transcript), 
+                (voice_preset, persona_prompt, json.dumps(transcript),
                  audio_path, duration_seconds)
             )
             conn.commit()
             return cursor.lastrowid
-    
-    def get_conversation(self, conv_id: int) -> Optional[Conversation]:
-        """Retrieve a conversation by ID"""
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT * FROM conversations WHERE id = ?",
-                (conv_id,)
-            ).fetchone()
-            
-            if row:
-                return Conversation(
-                    id=row[0],
-                    created_at=row[1],
-                    voice_preset=row[2],
-                    persona_prompt=row[3],
-                    transcript=json.loads(row[4]) if row[4] else [],
-                    audio_path=row[5],
-                    duration_seconds=row[6] if row[6] else 0.0
-                )
-            return None
-    
+
     def list_conversations(self, limit: int = 50, offset: int = 0) -> list:
-        """List conversations with pagination"""
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(
-                """SELECT id, created_at, voice_preset, persona_prompt, 
-                          duration_seconds 
-                   FROM conversations 
-                   ORDER BY created_at DESC 
-                   LIMIT ? OFFSET ?""",
+                """SELECT id, created_at, voice_preset, persona_prompt, duration_seconds
+                   FROM conversations ORDER BY created_at DESC LIMIT ? OFFSET ?""",
                 (limit, offset)
             ).fetchall()
-            
             return [
                 {
                     "id": row[0],
@@ -135,405 +126,307 @@ class StorageManager:
                 }
                 for row in rows
             ]
-    
-    def delete_conversation(self, conv_id: int) -> bool:
-        """Delete a conversation"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute(
-                "DELETE FROM conversations WHERE id = ?",
-                (conv_id,)
-            )
-            conn.commit()
-            return cursor.rowcount > 0
-    
-    def get_setting(self, key: str, default: str = None) -> Optional[str]:
-        """Get a setting value"""
-        with sqlite3.connect(self.db_path) as conn:
-            row = conn.execute(
-                "SELECT value FROM settings WHERE key = ?",
-                (key,)
-            ).fetchone()
-            return row[0] if row else default
-    
-    def set_setting(self, key: str, value: str):
-        """Set a setting value"""
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute(
-                """INSERT OR REPLACE INTO settings (key, value, updated_at)
-                   VALUES (?, ?, CURRENT_TIMESTAMP)""",
-                (key, value)
-            )
-            conn.commit()
 
 
-class ModelManager:
-    """Manages PersonaPlex model loading and inference"""
-    
-    def __init__(self):
-        self.model = None
-        self.mimi = None
-        self.tokenizer = None
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.loaded = False
-        self.current_voice = None
-        self.current_persona = None
-        
-        logger.info(f"ModelManager initialized (device: {self.device})")
-    
-    def load_model(self, cpu_offload: bool = True):
-        """Load the PersonaPlex model"""
-        if self.loaded:
-            logger.info("Model already loaded")
-            return
-        
-        try:
-            from moshi.models import loaders
-            
-            logger.info("Loading PersonaPlex model...")
-            model_path = MODELS_DIR / "model.safetensors"
-            
-            self.model = loaders.get_moshi_lm(
-                filename=str(model_path),
-                device=self.device,
-                cpu_offload=cpu_offload
-            )
-            
-            logger.info("Loading Mimi audio codec...")
-            self.mimi = loaders.get_mimi(
-                str(MODELS_DIR / "tokenizer-e351c8d8-checkpoint125.safetensors"),
-                device=self.device
-            )
-            
-            logger.info("Loading tokenizer...")
-            self.tokenizer = loaders.get_text_tokenizer(
-                str(MODELS_DIR / "tokenizer_spm_32k_3.model")
-            )
-            
-            self.loaded = True
-            logger.info("✓ Model loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            raise
-    
-    def unload_model(self):
-        """Unload model to free memory"""
-        self.model = None
-        self.mimi = None
-        self.tokenizer = None
-        self.loaded = False
-        torch.cuda.empty_cache()
-        logger.info("Model unloaded")
-    
-    def set_voice(self, voice_file: str):
-        """Set the voice prompt"""
-        voice_path = MODELS_DIR / "voices" / voice_file
-        if not voice_path.exists():
-            raise ValueError(f"Voice file not found: {voice_file}")
-        self.current_voice = str(voice_path)
-        logger.info(f"Voice set to: {voice_file}")
-    
-    def set_persona(self, persona_text: str):
-        """Set the persona prompt"""
-        self.current_persona = persona_text
-        logger.info(f"Persona set: {persona_text[:50]}...")
-    
-    def generate_response(self, audio_input: np.ndarray) -> np.ndarray:
-        """Generate audio response from input audio"""
-        # This is a simplified version - full implementation would use
-        # the actual PersonaPlex inference code
-        if not self.loaded:
-            raise RuntimeError("Model not loaded")
-        
-        # Placeholder: return silence
-        return np.zeros_like(audio_input)
+class ServerState:
+    """
+    Manages the PersonaPlex model and handles streaming conversations.
+    Closely follows the original Moshi server implementation.
+    """
 
+    def __init__(self, mimi, other_mimi, text_tokenizer: sentencepiece.SentencePieceProcessor,
+                 lm, device, voice_prompt_dir: str):
+        self.mimi = mimi
+        self.other_mimi = other_mimi
+        self.text_tokenizer = text_tokenizer
+        self.device = device
+        self.voice_prompt_dir = voice_prompt_dir
+        self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
 
-class AudioPipeline:
-    """Handles audio capture and playback"""
-    
-    def __init__(self, sample_rate: int = SAMPLE_RATE):
-        self.sample_rate = sample_rate
-        self.input_stream = None
-        self.output_stream = None
-        self.recording = False
-        
-    def start_recording(self, callback):
-        """Start capturing audio from microphone"""
-        import sounddevice as sd
-        
-        def audio_callback(indata, frames, time_info, status):
-            if status:
-                logger.warning(f"Audio status: {status}")
-            callback(indata[:, 0])  # Mono audio
-        
-        self.input_stream = sd.InputStream(
-            samplerate=self.sample_rate,
-            channels=1,
-            dtype=np.float32,
-            blocksize=CHUNK_SAMPLES,
-            callback=audio_callback
+        from moshi.models import LMGen
+        self.lm_gen = LMGen(
+            lm,
+            audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
+            sample_rate=self.mimi.sample_rate,
+            device=device,
+            frame_rate=self.mimi.frame_rate,
+            save_voice_prompt_embeddings=False,
         )
-        self.input_stream.start()
-        self.recording = True
-        logger.info("Audio recording started")
-    
-    def stop_recording(self):
-        """Stop capturing audio"""
-        if self.input_stream:
-            self.input_stream.stop()
-            self.input_stream.close()
-            self.input_stream = None
-        self.recording = False
-        logger.info("Audio recording stopped")
-    
-    def play_audio(self, audio_data: np.ndarray):
-        """Play audio through speakers"""
-        import sounddevice as sd
-        sd.play(audio_data, self.sample_rate)
-    
-    def stop_playback(self):
-        """Stop audio playback"""
-        import sounddevice as sd
-        sd.stop()
 
+        self.lock = asyncio.Lock()
+        self.mimi.streaming_forever(1)
+        self.other_mimi.streaming_forever(1)
+        self.lm_gen.streaming_forever(1)
 
-class PersonaPlexServer:
-    """WebSocket server for PersonaPlex communication"""
-    
-    def __init__(self, host: str = "0.0.0.0", port: int = 8998):
-        self.host = host
-        self.port = port
         self.storage = StorageManager()
-        self.model_manager = ModelManager()
-        self.audio_pipeline = AudioPipeline()
-        self.clients: set = set()
-        self.active_conversation = None
-        self.conversation_start_time = None
-        
-    async def start(self):
-        """Start the WebSocket server"""
-        logger.info(f"Starting server on {self.host}:{self.port}")
-        
-        # Load model on startup
-        try:
-            self.model_manager.load_model(cpu_offload=True)
-        except Exception as e:
-            logger.error(f"Failed to load model: {e}")
-            logger.warning("Server will run without model loaded")
-        
-        async with websockets.serve(self.handle_client, self.host, self.port):
-            logger.info(f"✓ Server running on ws://{self.host}:{self.port}")
-            await asyncio.Future()  # Run forever
-    
-    async def handle_client(self, websocket):
-        """Handle a client connection"""
-        self.clients.add(websocket)
-        client_id = id(websocket)
-        logger.info(f"Client {client_id} connected")
-        
-        try:
-            async for message in websocket:
-                await self.process_message(websocket, message)
-        except websockets.exceptions.ConnectionClosed:
-            logger.info(f"Client {client_id} disconnected")
-        finally:
-            self.clients.discard(websocket)
-    
-    async def process_message(self, websocket: WebSocketServerProtocol, message: str):
-        """Process incoming WebSocket message"""
-        try:
-            data = json.loads(message)
-            msg_type = data.get("type")
-            
-            if msg_type == "start_conversation":
-                await self.handle_start_conversation(websocket, data)
-            elif msg_type == "audio_chunk":
-                await self.handle_audio_chunk(websocket, data)
-            elif msg_type == "end_conversation":
-                await self.handle_end_conversation(websocket, data)
-            elif msg_type == "get_voices":
-                await self.handle_get_voices(websocket)
-            elif msg_type == "get_history":
-                await self.handle_get_history(websocket, data)
-            elif msg_type == "save_conversation":
-                await self.handle_save_conversation(websocket, data)
-            elif msg_type == "interrupt":
-                await self.handle_interrupt(websocket)
+        logger.info(f"ServerState initialized on {device}")
+
+    def warmup(self):
+        """Warmup the model with dummy frames."""
+        logger.info("Warming up model...")
+        for _ in range(4):
+            chunk = torch.zeros(1, 1, self.frame_size, dtype=torch.float32, device=self.device)
+            codes = self.mimi.encode(chunk)
+            _ = self.other_mimi.encode(chunk)
+            for c in range(codes.shape[-1]):
+                tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                if tokens is None:
+                    continue
+                _ = self.mimi.decode(tokens[:, 1:9])
+                _ = self.other_mimi.decode(tokens[:, 1:9])
+
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+        logger.info("Warmup complete")
+
+    async def handle_chat(self, request):
+        """Handle a WebSocket chat connection."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
+
+        peer = request.remote
+        logger.info(f"Incoming connection from {peer}")
+
+        voice_prompt = request.query.get("voice_prompt", "NATF1.pt")
+        text_prompt = request.query.get("text_prompt", "")
+
+        voice_prompt_path = None
+        if self.voice_prompt_dir:
+            voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt)
+            if not os.path.exists(voice_prompt_path):
+                logger.error(f"Voice prompt not found: {voice_prompt_path}")
+                await ws.send_bytes(bytes([MSG_ERROR]) + b"Voice prompt not found")
+                await ws.close()
+                return ws
+
+        if voice_prompt_path and self.lm_gen.voice_prompt != voice_prompt_path:
+            if voice_prompt_path.endswith('.pt'):
+                self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
             else:
-                await self.send_error(websocket, f"Unknown message type: {msg_type}")
-                
-        except json.JSONDecodeError:
-            await self.send_error(websocket, "Invalid JSON")
-        except Exception as e:
-            logger.error(f"Error processing message: {e}")
-            await self.send_error(websocket, str(e))
-    
-    async def handle_start_conversation(self, websocket: WebSocketServerProtocol, data: dict):
-        """Start a new conversation"""
-        voice = data.get("voice", "NATF1")
-        persona = data.get("persona", "You are a helpful assistant.")
-        
-        try:
-            self.model_manager.set_voice(f"{voice}.pt")
-            self.model_manager.set_persona(persona)
-            
-            self.active_conversation = {
-                "voice": voice,
-                "persona": persona,
-                "transcript": [],
-                "audio_chunks": []
-            }
-            self.conversation_start_time = datetime.now()
-            
-            await self.send_message(websocket, {
-                "type": "conversation_started",
-                "voice": voice,
-                "persona": persona
-            })
-            
-            logger.info(f"Conversation started with voice={voice}")
-            
-        except Exception as e:
-            await self.send_error(websocket, f"Failed to start conversation: {e}")
-    
-    async def handle_audio_chunk(self, websocket: WebSocketServerProtocol, data: dict):
-        """Process incoming audio chunk"""
-        if not self.active_conversation:
-            await self.send_error(websocket, "No active conversation")
-            return
-        
-        try:
-            # Decode base64 audio
-            audio_bytes = base64.b64decode(data["data"])
-            audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
-            
-            # Store for later
-            self.active_conversation["audio_chunks"].append(audio_array)
-            
-            # Generate response (simplified - would use actual model)
-            # For now, just echo back a placeholder
-            response_audio = np.zeros_like(audio_array)
-            response_b64 = base64.b64encode(response_audio.tobytes()).decode()
-            
-            await self.send_message(websocket, {
-                "type": "audio_response",
-                "data": response_b64
-            })
-            
-        except Exception as e:
-            logger.error(f"Error processing audio: {e}")
-            await self.send_error(websocket, f"Audio processing error: {e}")
-    
-    async def handle_end_conversation(self, websocket: WebSocketServerProtocol, data: dict):
-        """End the current conversation"""
-        if not self.active_conversation:
-            await self.send_error(websocket, "No active conversation")
-            return
-        
-        duration = 0.0
-        if self.conversation_start_time:
-            duration = (datetime.now() - self.conversation_start_time).total_seconds()
-        
-        await self.send_message(websocket, {
-            "type": "conversation_ended",
-            "duration": duration,
-            "message": "Conversation ended. Use 'save_conversation' to save it."
-        })
-        
-        self.active_conversation = None
-        self.conversation_start_time = None
-    
-    async def handle_save_conversation(self, websocket: WebSocketServerProtocol, data: dict):
-        """Save the conversation to storage"""
-        if not self.active_conversation:
-            await self.send_error(websocket, "No conversation to save")
-            return
-        
-        try:
-            conv_id = self.storage.save_conversation(
-                voice_preset=self.active_conversation["voice"],
-                persona_prompt=self.active_conversation["persona"],
-                transcript=self.active_conversation["transcript"],
-                duration_seconds=(datetime.now() - self.conversation_start_time).total_seconds() if self.conversation_start_time else 0.0
-            )
-            
-            await self.send_message(websocket, {
-                "type": "conversation_saved",
-                "id": conv_id
-            })
-            
-            logger.info(f"Conversation saved with ID: {conv_id}")
-            
-        except Exception as e:
-            await self.send_error(websocket, f"Failed to save conversation: {e}")
-    
-    async def handle_get_voices(self, websocket: WebSocketServerProtocol):
-        """Return list of available voices"""
-        voices_dir = MODELS_DIR / "voices"
-        voices = []
-        
-        if voices_dir.exists():
-            for voice_file in sorted(voices_dir.glob("*.pt")):
-                voice_name = voice_file.stem
-                voice_type = "Natural" if voice_name.startswith("NAT") else "Variety"
-                gender = "Female" if "F" in voice_name else "Male"
-                voices.append({
-                    "id": voice_name,
-                    "name": voice_name,
-                    "type": voice_type,
-                    "gender": gender,
-                    "file": voice_file.name
-                })
-        
-        await self.send_message(websocket, {
-            "type": "voices_list",
-            "voices": voices
-        })
-    
-    async def handle_get_history(self, websocket: WebSocketServerProtocol, data: dict):
-        """Return conversation history"""
-        limit = data.get("limit", 50)
-        offset = data.get("offset", 0)
-        
-        conversations = self.storage.list_conversations(limit, offset)
-        
-        await self.send_message(websocket, {
-            "type": "history_list",
-            "conversations": conversations
-        })
-    
-    async def handle_interrupt(self, websocket: WebSocketServerProtocol):
-        """Handle conversation interrupt"""
-        await self.send_message(websocket, {
-            "type": "interrupted",
-            "message": "Generation interrupted"
-        })
-    
-    async def send_message(self, websocket: WebSocketServerProtocol, data: dict):
-        """Send message to client"""
-        await websocket.send(json.dumps(data))
-    
-    async def send_error(self, websocket: WebSocketServerProtocol, error: str):
-        """Send error message to client"""
-        await self.send_message(websocket, {
-            "type": "error",
-            "message": error
-        })
+                self.lm_gen.load_voice_prompt(voice_prompt_path)
+
+        if text_prompt:
+            self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt))
+        else:
+            self.lm_gen.text_prompt_tokens = None
+
+        close = False
+
+        async def recv_loop(opus_reader):
+            nonlocal close
+            async for message in ws:
+                if message.type == aiohttp.WSMsgType.ERROR:
+                    logger.error(f"WebSocket error: {ws.exception()}")
+                    break
+                elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                    break
+                elif message.type != aiohttp.WSMsgType.BINARY:
+                    logger.warning(f"Unexpected message type: {message.type}")
+                    continue
+
+                data = message.data
+                if not isinstance(data, bytes) or len(data) == 0:
+                    continue
+
+                kind = data[0]
+                payload = data[1:]
+
+                if kind == MSG_AUDIO:
+                    opus_reader.append_bytes(payload)
+                elif kind == MSG_CONTROL:
+                    logger.info(f"Control message: {payload}")
+                elif kind == MSG_METADATA:
+                    logger.info(f"Metadata: {payload.decode('utf-8', errors='replace')}")
+                else:
+                    logger.warning(f"Unknown message kind: {kind}")
+
+            close = True
+            logger.info("Receive loop ended")
+
+        async def opus_loop(opus_reader, opus_writer):
+            nonlocal close
+            all_pcm_data = None
+            frame_count = 0
+
+            while not close:
+                await asyncio.sleep(0.001)
+                pcm = opus_reader.read_pcm()
+
+                if pcm.shape[-1] == 0:
+                    continue
+
+                if all_pcm_data is None:
+                    all_pcm_data = pcm
+                else:
+                    all_pcm_data = np.concatenate((all_pcm_data, pcm))
+
+                while all_pcm_data.shape[-1] >= self.frame_size:
+                    frame_count += 1
+                    if frame_count <= 5:
+                        logger.info(f"Processing frame {frame_count}")
+
+                    chunk = all_pcm_data[:self.frame_size]
+                    all_pcm_data = all_pcm_data[self.frame_size:]
+
+                    chunk_tensor = torch.from_numpy(chunk)
+                    chunk_tensor = chunk_tensor.to(device=self.device)[None, None]
+
+                    codes = self.mimi.encode(chunk_tensor)
+                    _ = self.other_mimi.encode(chunk_tensor)
+
+                    for c in range(codes.shape[-1]):
+                        tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                        if tokens is None:
+                            continue
+
+                        main_pcm = self.mimi.decode(tokens[:, 1:9])
+                        _ = self.other_mimi.decode(tokens[:, 1:9])
+                        main_pcm = main_pcm.cpu()
+                        opus_writer.append_pcm(main_pcm[0, 0].numpy())
+
+                        text_token = tokens[0, 0, 0].item()
+                        if text_token not in (0, 3):
+                            text_piece = self.text_tokenizer.id_to_piece(text_token)
+                            text_piece = text_piece.replace("▁", " ")
+                            msg = bytes([MSG_TEXT]) + text_piece.encode('utf-8')
+                            await ws.send_bytes(msg)
+
+            logger.info(f"Opus loop ended after {frame_count} frames")
+
+        async def send_loop(opus_writer):
+            nonlocal close
+            while not close:
+                await asyncio.sleep(0.001)
+                msg = opus_writer.read_bytes()
+                if len(msg) > 0:
+                    await ws.send_bytes(bytes([MSG_AUDIO]) + msg)
+
+        async with self.lock:
+            opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
+            opus_reader = sphn.OpusStreamReader(self.mimi.sample_rate)
+
+            self.mimi.reset_streaming()
+            self.other_mimi.reset_streaming()
+            self.lm_gen.reset_streaming()
+
+            async def is_alive():
+                if close or ws.closed:
+                    return False
+                return True
+
+            logger.info("Priming model with system prompts...")
+            await self.lm_gen.step_system_prompts_async(self.mimi, is_alive=is_alive)
+            self.mimi.reset_streaming()
+            logger.info("System prompts complete")
+
+            if await is_alive():
+                await ws.send_bytes(bytes([MSG_HANDSHAKE]))
+                logger.info("Sent handshake, starting audio loops")
+
+                tasks = [
+                    asyncio.create_task(recv_loop(opus_reader)),
+                    asyncio.create_task(opus_loop(opus_reader, opus_writer)),
+                    asyncio.create_task(send_loop(opus_writer)),
+                ]
+
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+                for task in pending:
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                await ws.close()
+
+        logger.info("Connection closed")
+        return ws
+
+    async def handle_api(self, request):
+        """Handle REST API requests for voices and history."""
+        action = request.match_info.get('action')
+
+        if action == 'voices':
+            voices = []
+            voices_dir = Path(self.voice_prompt_dir)
+            if voices_dir.exists():
+                for voice_file in sorted(voices_dir.glob("*.pt")):
+                    voice_name = voice_file.stem
+                    voice_type = "Natural" if voice_name.startswith("NAT") else "Variety"
+                    gender = "Female" if "F" in voice_name else "Male"
+                    voices.append({
+                        "id": voice_name,
+                        "name": f"{voice_type} {gender} {voice_name[-1]}",
+                        "type": voice_type,
+                        "gender": gender,
+                        "file": voice_file.name
+                    })
+            return web.json_response({"voices": voices})
+
+        elif action == 'history':
+            limit = int(request.query.get('limit', 50))
+            offset = int(request.query.get('offset', 0))
+            conversations = self.storage.list_conversations(limit, offset)
+            return web.json_response({"conversations": conversations})
+
+        return web.json_response({"error": "Unknown action"}, status=400)
 
 
 def main():
-    """Main entry point"""
-    server = PersonaPlexServer(host="0.0.0.0", port=8998)
-    
-    try:
-        asyncio.run(server.start())
-    except KeyboardInterrupt:
-        logger.info("Server stopped by user")
-    except Exception as e:
-        logger.error(f"Server error: {e}")
-        raise
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", default="0.0.0.0", type=str)
+    parser.add_argument("--port", default=8998, type=int)
+    parser.add_argument("--device", type=str, default="cuda")
+    parser.add_argument("--cpu-offload", action="store_true", default=True)
+    args = parser.parse_args()
+
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+
+    from moshi.models import loaders
+
+    logger.info("Loading Mimi audio codec...")
+    mimi_path = str(MODELS_DIR / "tokenizer-e351c8d8-checkpoint125.safetensors")
+    mimi = loaders.get_mimi(mimi_path, device)
+    other_mimi = loaders.get_mimi(mimi_path, device)
+    logger.info("Mimi loaded")
+
+    logger.info("Loading text tokenizer...")
+    text_tokenizer = sentencepiece.SentencePieceProcessor()
+    text_tokenizer.load(str(MODELS_DIR / "tokenizer_spm_32k_3.model"))
+
+    logger.info("Loading PersonaPlex model...")
+    moshi_path = str(MODELS_DIR / "model.safetensors")
+    lm = loaders.get_moshi_lm(moshi_path, device=device, cpu_offload=args.cpu_offload)
+    lm.eval()
+    logger.info("PersonaPlex model loaded")
+
+    voice_prompt_dir = str(MODELS_DIR / "voices")
+
+    state = ServerState(
+        mimi=mimi,
+        other_mimi=other_mimi,
+        text_tokenizer=text_tokenizer,
+        lm=lm,
+        device=device,
+        voice_prompt_dir=voice_prompt_dir,
+    )
+
+    logger.info("Warming up model...")
+    state.warmup()
+
+    app = web.Application()
+    app.router.add_get("/api/chat", state.handle_chat)
+    app.router.add_get("/api/{action}", state.handle_api)
+
+    logger.info(f"Starting server on {args.host}:{args.port}")
+    logger.info(f"WebSocket endpoint: ws://{args.host}:{args.port}/api/chat")
+    web.run_app(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":
-    main()
+    with torch.no_grad():
+        main()
