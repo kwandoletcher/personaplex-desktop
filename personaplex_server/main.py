@@ -217,7 +217,7 @@ class ServerState:
 
                 if kind == MSG_AUDIO:
                     pcm = opus_reader.append_bytes(payload)
-                    if pcm.shape[-1] == 0:
+                    if pcm is None or pcm.shape[-1] == 0:
                         continue
 
                     if all_pcm_data is None:
@@ -402,7 +402,8 @@ def main():
     logger.info("PersonaPlex model loaded")
 
     # Create LMGen with PersonaPlex's API
-    lm_gen = LMGen(lm, device=device)
+    # text_prompt_tokens=[] to avoid NoneType iteration error in step_system_prompts
+    lm_gen = LMGen(lm, device=device, text_prompt_tokens=[])
 
     voice_prompt_dir = str(MODELS_DIR / "voices")
 
