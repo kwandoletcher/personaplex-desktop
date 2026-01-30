@@ -15,6 +15,7 @@ Binary Protocol:
 import os
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['NO_TORCH_COMPILE'] = '1'
+os.environ['NO_CUDA_GRAPH'] = '1'  # Disable CUDA graphs - incompatible with CPU offloading
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 import asyncio
@@ -30,8 +31,23 @@ import numpy as np
 import torch
 import aiohttp
 from aiohttp import web
+from aiohttp.web import middleware
 import sphn
 import sentencepiece
+
+
+@middleware
+async def cors_middleware(request, handler):
+    """Add CORS headers to all responses."""
+    if request.method == 'OPTIONS':
+        response = web.Response()
+    else:
+        response = await handler(request)
+
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
+    return response
 
 torch._dynamo.config.disable = True
 torch._dynamo.reset()
@@ -154,16 +170,33 @@ class ServerState:
         )
 
         self.lock = asyncio.Lock()
-        self.mimi.streaming_forever(1)
-        self.other_mimi.streaming_forever(1)
-        self.lm_gen.streaming_forever(1)
+        # Don't initialize streaming here - do it per-connection
+        # This avoids issues with accelerate's dispatch_model
+        self._streaming_initialized = False
 
         self.storage = StorageManager()
         logger.info(f"ServerState initialized on {device}")
 
+    def _ensure_streaming(self):
+        """Initialize streaming state on first use."""
+        if not self._streaming_initialized:
+            logger.info("Initializing streaming state...")
+            self.mimi.streaming_forever(1)
+            self.other_mimi.streaming_forever(1)
+            self.lm_gen.streaming_forever(1)
+            self._streaming_initialized = True
+            logger.info("Streaming state initialized")
+
     def warmup(self):
         """Warmup the model with dummy frames."""
         logger.info("Warming up model...")
+
+        # Initialize streaming state first
+        self._ensure_streaming()
+        self.mimi.reset_streaming()
+        self.other_mimi.reset_streaming()
+        self.lm_gen.reset_streaming()
+
         # Mimi is on CPU, LMGen is on GPU
         mimi_device = next(self.mimi.parameters()).device
         for _ in range(4):
@@ -315,6 +348,9 @@ class ServerState:
             opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
             opus_reader = sphn.OpusStreamReader(self.mimi.sample_rate)
 
+            # Initialize streaming state on first connection
+            self._ensure_streaming()
+
             self.mimi.reset_streaming()
             self.other_mimi.reset_streaming()
             self.lm_gen.reset_streaming()
@@ -391,6 +427,8 @@ def main():
     parser.add_argument("--port", default=8998, type=int)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--cpu-offload", action="store_true", default=True)
+    parser.add_argument("--quantize-4bit", action="store_true", default=False,
+                       help="Use 4-bit quantization (experimental, may not work)")
     args = parser.parse_args()
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -410,12 +448,17 @@ def main():
 
     logger.info("Loading PersonaPlex model...")
     moshi_path = str(MODELS_DIR / "model.safetensors")
-    lm = loaders.get_moshi_lm(moshi_path, device=device, cpu_offload=args.cpu_offload)
+    lm = loaders.get_moshi_lm(
+        moshi_path,
+        device=device,
+        cpu_offload=args.cpu_offload,
+        quantize_4bit=args.quantize_4bit
+    )
     lm.eval()
     logger.info("PersonaPlex model loaded")
 
-    # Reduce context window to fit in 16GB VRAM
-    logger.info("Reducing context window to 1500 tokens to conserve VRAM...")
+    # Reduce context window to fit in 16GB VRAM with CPU offloading
+    logger.info("Setting context window to 1500 tokens...")
     from moshi.modules.transformer import set_attention_context
     set_attention_context(lm, 1500)
 
@@ -430,10 +473,13 @@ def main():
         voice_prompt_dir=voice_prompt_dir,
     )
 
-    logger.info("Warming up model...")
-    state.warmup()
+    # Warmup the model (skip for CPU offloading - accelerate hooks cause issues)
+    if args.cpu_offload:
+        logger.info("Skipping warmup (CPU offload mode)")
+    else:
+        state.warmup()
 
-    app = web.Application()
+    app = web.Application(middlewares=[cors_middleware])
     app.router.add_get("/api/chat", state.handle_chat)
     app.router.add_get("/api/{action}", state.handle_api)
 

@@ -1,6 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { Mic, MicOff, Play, Square, User, Bot, Volume2, Activity, History } from 'lucide-react'
-import Recorder from 'opus-recorder'
+
+// opus-recorder is a UMD module - need to handle both default and module exports
+import RecorderModule from 'opus-recorder'
+const Recorder = RecorderModule.default || RecorderModule
 
 // Binary protocol message types
 const MSG_HANDSHAKE = 0x00
@@ -242,7 +245,7 @@ function PersonaEditor({ persona, setPersona, onBack, onStart }) {
 }
 
 // Active Conversation Screen
-function ActiveConversation({ voice, persona, onEnd }) {
+function ActiveConversation({ voice, persona, onEnd, serverUrl }) {
   const [status, setStatus] = useState('connecting')  // connecting, priming, ready, recording, error
   const [transcript, setTranscript] = useState([])
   const [currentText, setCurrentText] = useState('')
@@ -551,7 +554,7 @@ function ActiveConversation({ voice, persona, onEnd }) {
         voice_prompt: `${voice}.pt`,
         text_prompt: persona
       })
-      const wsUrl = `ws://localhost:8998/api/chat?${params.toString()}`
+      const wsUrl = `ws://${serverUrl}/api/chat?${params.toString()}`
 
       const socket = new WebSocket(wsUrl)
       socket.binaryType = 'arraybuffer'
@@ -646,7 +649,7 @@ function ActiveConversation({ voice, persona, onEnd }) {
         audioContextRef.current.close()
       }
     }
-  }, [voice, persona, initAudioContext, initDecoderWorker, startRecording, stopRecording])
+  }, [voice, persona, serverUrl, initAudioContext, initDecoderWorker, startRecording, stopRecording])
 
   // Handle end conversation
   const handleEnd = useCallback(() => {
@@ -898,12 +901,12 @@ function ActiveConversation({ voice, persona, onEnd }) {
 }
 
 // History Screen
-function HistoryScreen({ onBack }) {
+function HistoryScreen({ onBack, serverUrl }) {
   const [conversations, setConversations] = useState([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    fetch('http://localhost:8998/api/history')
+    fetch(`http://${serverUrl}/api/history`)
       .then(res => res.json())
       .then(data => {
         setConversations(data.conversations || [])
@@ -913,7 +916,7 @@ function HistoryScreen({ onBack }) {
         console.error('Failed to fetch history:', err)
         setLoading(false)
       })
-  }, [])
+  }, [serverUrl])
 
   return (
     <div style={{ padding: '2rem' }}>
@@ -980,25 +983,51 @@ function App() {
   const [persona, setPersona] = useState('')
   const [serverStatus, setServerStatus] = useState('checking')
 
+  // Server URL - try localhost first, then WSL IP
+  const [serverUrl, setServerUrl] = useState('localhost:8998')
+
   // Check server connection
   useEffect(() => {
     const checkServer = async () => {
+      // Try current serverUrl
       try {
-        const response = await fetch('http://localhost:8998/api/voices')
+        const response = await fetch(`http://${serverUrl}/api/voices`)
         if (response.ok) {
           setServerStatus('connected')
-        } else {
-          setServerStatus('error')
+          return
         }
       } catch (err) {
+        // Try localhost first
+        if (serverUrl !== 'localhost:8998') {
+          try {
+            const response = await fetch('http://localhost:8998/api/voices')
+            if (response.ok) {
+              setServerUrl('localhost:8998')
+              setServerStatus('connected')
+              return
+            }
+          } catch (e) {}
+        }
+
+        // Try 127.0.0.1
+        try {
+          const response = await fetch('http://127.0.0.1:8998/api/voices')
+          if (response.ok) {
+            setServerUrl('127.0.0.1:8998')
+            setServerStatus('connected')
+            return
+          }
+        } catch (e) {}
+
         setServerStatus('disconnected')
       }
     }
 
     checkServer()
-    const interval = setInterval(checkServer, 5000)
+    // Only poll when not in conversation
+    const interval = setInterval(checkServer, 10000)
     return () => clearInterval(interval)
-  }, [])
+  }, [serverUrl])
 
   const startConversation = () => {
     setScreen('conversation')
@@ -1133,11 +1162,12 @@ function App() {
             voice={selectedVoice}
             persona={persona}
             onEnd={endConversation}
+            serverUrl={serverUrl}
           />
         )}
 
         {screen === 'history' && (
-          <HistoryScreen onBack={() => setScreen('home')} />
+          <HistoryScreen onBack={() => setScreen('home')} serverUrl={serverUrl} />
         )}
       </main>
     </div>
