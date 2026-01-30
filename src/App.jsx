@@ -529,6 +529,8 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
   // Ref for synchronous text accumulation (fixes disappearing text bug)
   const currentTextRef = useRef('')
   const textCommitTimeoutRef = useRef(null)  // Timeout to commit text after pause
+  const lastTextTimeRef = useRef(0)  // Track when we last received text
+  const speakingTimeoutRef = useRef(null)  // Reset isSpeaking after silence
 
   const socketRef = useRef(null)
   const recorderRef = useRef(null)
@@ -876,40 +878,61 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
             break
 
           case 'text':
+            // Track when we received text
+            lastTextTimeRef.current = Date.now()
+
             // Clear any pending commit timeout
             if (textCommitTimeoutRef.current) {
               clearTimeout(textCommitTimeoutRef.current)
               textCommitTimeoutRef.current = null
             }
 
+            // Clear speaking timeout since we're still receiving
+            if (speakingTimeoutRef.current) {
+              clearTimeout(speakingTimeoutRef.current)
+              speakingTimeoutRef.current = null
+            }
+
             // Accumulate text using ref for synchronous access
             currentTextRef.current += message.data
             setCurrentText(currentTextRef.current)
+            setIsSpeaking(true)
+
+            // Log for debugging
+            console.log('[Text] Received:', message.data, '| Total:', currentTextRef.current.length, 'chars')
 
             // Check for sentence end using ref (not stale state)
             if (currentTextRef.current.match(/[.!?]\s*$/)) {
+              const textToCommit = currentTextRef.current.trim()
+              console.log('[Text] Committing (punctuation):', textToCommit.substring(0, 50))
               setTranscript(prev => [...prev, {
                 speaker: 'ai',
-                text: currentTextRef.current.trim(),
+                text: textToCommit,
                 timestamp: new Date()
               }])
               currentTextRef.current = ''
               setCurrentText('')
+
+              // Reset speaking after a short delay
+              speakingTimeoutRef.current = setTimeout(() => setIsSpeaking(false), 500)
             } else {
-              // Set a timeout to commit text after 1.5s pause (no more text arriving)
+              // Set a timeout to commit text after 2s pause (no more text arriving)
               textCommitTimeoutRef.current = setTimeout(() => {
                 if (currentTextRef.current.trim()) {
+                  const textToCommit = currentTextRef.current.trim()
+                  console.log('[Text] Committing (timeout):', textToCommit.substring(0, 50))
                   setTranscript(prev => [...prev, {
                     speaker: 'ai',
-                    text: currentTextRef.current.trim(),
+                    text: textToCommit,
                     timestamp: new Date()
                   }])
                   currentTextRef.current = ''
                   setCurrentText('')
                 }
-              }, 1500)
+                // Reset speaking state
+                speakingTimeoutRef.current = setTimeout(() => setIsSpeaking(false), 500)
+              }, 2000)  // Increased to 2 seconds
             }
-            setIsSpeaking(true)
             break
 
           case 'error':
@@ -923,19 +946,33 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
       }
 
       socket.onclose = () => {
-        if (!mounted) return
-        // Clear any pending text commit timeout
+        console.log('[WebSocket] Connection closed, mounted:', mounted)
+
+        // Clear any pending timeouts
         if (textCommitTimeoutRef.current) {
           clearTimeout(textCommitTimeoutRef.current)
           textCommitTimeoutRef.current = null
         }
-        // Save any remaining text to transcript
-        if (currentTextRef.current.trim()) {
-          setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
-          currentTextRef.current = ''
-          setCurrentText('')
+        if (speakingTimeoutRef.current) {
+          clearTimeout(speakingTimeoutRef.current)
+          speakingTimeoutRef.current = null
         }
+
+        // Save any remaining text to transcript (do this even if unmounting)
+        if (currentTextRef.current.trim()) {
+          const textToCommit = currentTextRef.current.trim()
+          console.log('[Text] Committing on close:', textToCommit.substring(0, 50))
+          if (mounted) {
+            setTranscript(prev => [...prev, { speaker: 'ai', text: textToCommit, timestamp: new Date() }])
+            setCurrentText('')
+          }
+          currentTextRef.current = ''
+        }
+
+        if (!mounted) return
+
         setStatus('connecting')
+        setIsSpeaking(false)
         stopRecording()
       }
 
@@ -950,10 +987,23 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
 
     return () => {
       mounted = false
-      // Clear text commit timeout
+
+      // Commit any remaining text before cleanup
+      if (currentTextRef.current.trim()) {
+        const textToCommit = currentTextRef.current.trim()
+        console.log('[Text] Committing on cleanup:', textToCommit.substring(0, 50))
+        setTranscript(prev => [...prev, { speaker: 'ai', text: textToCommit, timestamp: new Date() }])
+        currentTextRef.current = ''
+      }
+
+      // Clear all timeouts
       if (textCommitTimeoutRef.current) {
         clearTimeout(textCommitTimeoutRef.current)
         textCommitTimeoutRef.current = null
+      }
+      if (speakingTimeoutRef.current) {
+        clearTimeout(speakingTimeoutRef.current)
+        speakingTimeoutRef.current = null
       }
 
       stopRecording()
@@ -1654,6 +1704,8 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
 
   const currentTextRef = useRef('')
   const textCommitTimeoutRef = useRef(null)  // Timeout to commit text after pause
+  const lastTextTimeRef = useRef(0)  // Track when we last received text
+  const speakingTimeoutRef = useRef(null)  // Reset isSpeaking after silence
   const socketRef = useRef(null)
   const recorderRef = useRef(null)
   const audioContextRef = useRef(null)
@@ -1894,31 +1946,53 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
             }
             break
           case 'text':
+            // Track when we received text
+            lastTextTimeRef.current = Date.now()
+
             // Clear any pending commit timeout
             if (textCommitTimeoutRef.current) {
               clearTimeout(textCommitTimeoutRef.current)
               textCommitTimeoutRef.current = null
             }
 
+            // Clear speaking timeout since we're still receiving
+            if (speakingTimeoutRef.current) {
+              clearTimeout(speakingTimeoutRef.current)
+              speakingTimeoutRef.current = null
+            }
+
+            // Accumulate text
             currentTextRef.current += message.data
             setCurrentText(currentTextRef.current)
+            setIsSpeaking(true)
+
+            // Log for debugging
+            console.log('[Text] Received:', message.data, '| Total:', currentTextRef.current.length, 'chars')
 
             // If text ends with sentence punctuation, commit immediately
             if (currentTextRef.current.match(/[.!?]\s*$/)) {
-              setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
+              const textToCommit = currentTextRef.current.trim()
+              console.log('[Text] Committing (punctuation):', textToCommit.substring(0, 50))
+              setTranscript(prev => [...prev, { speaker: 'ai', text: textToCommit, timestamp: new Date() }])
               currentTextRef.current = ''
               setCurrentText('')
+
+              // Reset speaking after a short delay
+              speakingTimeoutRef.current = setTimeout(() => setIsSpeaking(false), 500)
             } else {
-              // Set a timeout to commit text after 1.5s pause (no more text arriving)
+              // Set a timeout to commit text after 2s pause (no more text arriving)
               textCommitTimeoutRef.current = setTimeout(() => {
                 if (currentTextRef.current.trim()) {
-                  setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
+                  const textToCommit = currentTextRef.current.trim()
+                  console.log('[Text] Committing (timeout):', textToCommit.substring(0, 50))
+                  setTranscript(prev => [...prev, { speaker: 'ai', text: textToCommit, timestamp: new Date() }])
                   currentTextRef.current = ''
                   setCurrentText('')
                 }
-              }, 1500)
+                // Reset speaking state
+                speakingTimeoutRef.current = setTimeout(() => setIsSpeaking(false), 500)
+              }, 2000)  // Increased to 2 seconds
             }
-            setIsSpeaking(true)
             break
           case 'error':
             setErrorMessage(message.data)
@@ -1928,19 +2002,33 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
       }
 
       socket.onclose = () => {
-        if (!mounted) return
-        // Clear any pending text commit timeout
+        console.log('[WebSocket] Connection closed, mounted:', mounted)
+
+        // Clear any pending timeouts
         if (textCommitTimeoutRef.current) {
           clearTimeout(textCommitTimeoutRef.current)
           textCommitTimeoutRef.current = null
         }
-        // Save any remaining text to transcript
-        if (currentTextRef.current.trim()) {
-          setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
-          currentTextRef.current = ''
-          setCurrentText('')
+        if (speakingTimeoutRef.current) {
+          clearTimeout(speakingTimeoutRef.current)
+          speakingTimeoutRef.current = null
         }
+
+        // Save any remaining text to transcript (do this even if unmounting)
+        if (currentTextRef.current.trim()) {
+          const textToCommit = currentTextRef.current.trim()
+          console.log('[Text] Committing on close:', textToCommit.substring(0, 50))
+          if (mounted) {
+            setTranscript(prev => [...prev, { speaker: 'ai', text: textToCommit, timestamp: new Date() }])
+            setCurrentText('')
+          }
+          currentTextRef.current = ''
+        }
+
+        if (!mounted) return
+
         setStatus('connecting')
+        setIsSpeaking(false)
         stopRecording()
       }
       socket.onerror = (err) => { console.error('WebSocket error:', err); setErrorMessage('Connection error'); setStatus('error') }
@@ -1950,11 +2038,25 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
 
     return () => {
       mounted = false
-      // Clear text commit timeout
+
+      // Commit any remaining text before cleanup
+      if (currentTextRef.current.trim()) {
+        const textToCommit = currentTextRef.current.trim()
+        console.log('[Text] Committing on cleanup:', textToCommit.substring(0, 50))
+        setTranscript(prev => [...prev, { speaker: 'ai', text: textToCommit, timestamp: new Date() }])
+        currentTextRef.current = ''
+      }
+
+      // Clear all timeouts
       if (textCommitTimeoutRef.current) {
         clearTimeout(textCommitTimeoutRef.current)
         textCommitTimeoutRef.current = null
       }
+      if (speakingTimeoutRef.current) {
+        clearTimeout(speakingTimeoutRef.current)
+        speakingTimeoutRef.current = null
+      }
+
       stopRecording()
       if (socketRef.current) { socketRef.current.close(); socketRef.current = null }
       if (decoderWorkerRef.current) { decoderWorkerRef.current.terminate(); decoderWorkerRef.current = null }

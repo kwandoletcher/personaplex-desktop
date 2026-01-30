@@ -191,6 +191,7 @@ class ServerState:
         async def recv_loop(opus_reader):
             """Receive WebSocket messages and buffer audio data."""
             nonlocal close
+            audio_packets_received = 0
             async for message in ws:
                 if message.type == aiohttp.WSMsgType.ERROR:
                     logger.error(f"WebSocket error: {ws.exception()}")
@@ -209,17 +210,21 @@ class ServerState:
 
                 if kind == MSG_AUDIO:
                     opus_reader.append_bytes(payload)
+                    audio_packets_received += 1
+                    if audio_packets_received <= 5 or audio_packets_received % 100 == 0:
+                        logger.info(f"Received audio packet #{audio_packets_received} ({len(payload)} bytes)")
                 elif kind == MSG_CONTROL:
                     logger.info(f"Control message: {payload}")
 
             close = True
-            logger.info("Receive loop ended")
+            logger.info(f"Receive loop ended after {audio_packets_received} audio packets")
 
         async def process_loop(opus_reader, opus_writer):
             """Process audio through the model."""
             nonlocal close
             all_pcm_data = None
             frame_count = 0
+            text_tokens_sent = 0
 
             while not close:
                 await asyncio.sleep(0.001)  # Yield to other tasks
@@ -260,19 +265,26 @@ class ServerState:
                             text_piece = self.text_tokenizer.id_to_piece(text_token)
                             text_piece = text_piece.replace("▁", " ")
                             await ws.send_bytes(bytes([MSG_TEXT]) + text_piece.encode('utf-8'))
+                            text_tokens_sent += 1
+                            if text_tokens_sent <= 10:
+                                logger.info(f"Sent text token #{text_tokens_sent}: '{text_piece}'")
 
-            logger.info(f"Process loop ended after {frame_count} frames")
+            logger.info(f"Process loop ended after {frame_count} frames, {text_tokens_sent} text tokens")
 
         async def send_loop(opus_writer):
             """Send encoded audio back to client."""
             nonlocal close
+            audio_packets_sent = 0
             while not close:
                 await asyncio.sleep(0.001)  # Yield to other tasks
                 opus_bytes = opus_writer.read_bytes()
                 if opus_bytes is not None and len(opus_bytes) > 0:
                     await ws.send_bytes(bytes([MSG_AUDIO]) + opus_bytes)
+                    audio_packets_sent += 1
+                    if audio_packets_sent <= 5 or audio_packets_sent % 100 == 0:
+                        logger.info(f"Sent audio packet #{audio_packets_sent} ({len(opus_bytes)} bytes)")
 
-            logger.info("Send loop ended")
+            logger.info(f"Send loop ended after {audio_packets_sent} audio packets")
 
         async with self.lock:
             opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
