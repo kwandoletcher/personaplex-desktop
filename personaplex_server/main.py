@@ -179,8 +179,10 @@ class ServerState:
         """Decode tokens to audio and send via WebSocket."""
         main_pcm = self.mimi.decode(tokens[:, 1:])
         main_pcm = main_pcm.cpu()
-        opus_bytes = opus_writer.append_pcm(main_pcm[0, 0].numpy())
-        if len(opus_bytes) > 0:
+        # sphn 0.1.x: append_pcm buffers, read_bytes returns encoded data
+        opus_writer.append_pcm(main_pcm[0, 0].numpy())
+        opus_bytes = opus_writer.read_bytes()
+        if opus_bytes is not None and len(opus_bytes) > 0:
             await ws.send_bytes(bytes([MSG_AUDIO]) + opus_bytes)
 
         text_token = tokens[0, 0, 0].item()
