@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PersonaPlex Desktop - Real-Time Full-Duplex Streaming Server
-Matches the original PersonaPlex/Moshi binary protocol exactly.
+Compatible with moshi 0.2.12 API.
 
 Binary Protocol:
   0x00 = handshake (server sends when ready)
@@ -15,16 +15,15 @@ Binary Protocol:
 import os
 os.environ['TORCH_COMPILE_DISABLE'] = '1'
 os.environ['NO_TORCH_COMPILE'] = '1'
-os.environ['NO_CUDA_GRAPH'] = '1'  # Disable CUDA graphs - incompatible with CPU offloading
-os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
 import asyncio
 import json
 import sqlite3
 import logging
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Callable
+from typing import Optional
 from dataclasses import dataclass
 
 import numpy as np
@@ -34,6 +33,25 @@ from aiohttp import web
 from aiohttp.web import middleware
 import sphn
 import sentencepiece
+
+torch._dynamo.config.disable = True
+torch._dynamo.reset()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+DB_PATH = Path(__file__).parent / "conversations.db"
+MODELS_DIR = Path(__file__).parent / "models"
+
+MSG_HANDSHAKE = 0x00
+MSG_AUDIO = 0x01
+MSG_TEXT = 0x02
+MSG_CONTROL = 0x03
+MSG_METADATA = 0x04
+MSG_ERROR = 0x05
 
 
 @middleware
@@ -48,36 +66,6 @@ async def cors_middleware(request, handler):
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
-
-torch._dynamo.config.disable = True
-torch._dynamo.reset()
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-SAMPLE_RATE = 24000
-FRAME_RATE = 12.5
-FRAME_SIZE = int(SAMPLE_RATE / FRAME_RATE)
-DB_PATH = Path(__file__).parent / "conversations.db"
-MODELS_DIR = Path(__file__).parent / "models"
-
-MSG_HANDSHAKE = 0x00
-MSG_AUDIO = 0x01
-MSG_TEXT = 0x02
-MSG_CONTROL = 0x03
-MSG_METADATA = 0x04
-MSG_ERROR = 0x05
-
-
-def wrap_with_system_tags(text: str) -> str:
-    """Add system tags as the model expects."""
-    cleaned = text.strip()
-    if cleaned.startswith("<system>") and cleaned.endswith("<system>"):
-        return cleaned
-    return f"<system> {cleaned} <system>"
 
 
 @dataclass
@@ -147,112 +135,74 @@ class StorageManager:
 class ServerState:
     """
     Manages the PersonaPlex model and handles streaming conversations.
-    Closely follows the original Moshi server implementation.
+    Based on the official moshi server implementation for moshi 0.2.12.
     """
 
-    def __init__(self, mimi, other_mimi, text_tokenizer: sentencepiece.SentencePieceProcessor,
-                 lm, device, voice_prompt_dir: str):
+    def __init__(self, mimi, text_tokenizer: sentencepiece.SentencePieceProcessor,
+                 lm_gen, device, voice_prompt_dir: str):
         self.mimi = mimi
-        self.other_mimi = other_mimi
         self.text_tokenizer = text_tokenizer
+        self.lm_gen = lm_gen
         self.device = device
         self.voice_prompt_dir = voice_prompt_dir
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
-
-        from moshi.models import LMGen
-        self.lm_gen = LMGen(
-            lm,
-            audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
-            sample_rate=self.mimi.sample_rate,
-            device=device,
-            frame_rate=self.mimi.frame_rate,
-            save_voice_prompt_embeddings=False,
-        )
-
         self.lock = asyncio.Lock()
-        # Don't initialize streaming here - do it per-connection
-        # This avoids issues with accelerate's dispatch_model
-        self._streaming_initialized = False
-
         self.storage = StorageManager()
-        logger.info(f"ServerState initialized on {device}")
 
-    def _ensure_streaming(self):
-        """Initialize streaming state on first use."""
-        if not self._streaming_initialized:
-            logger.info("Initializing streaming state...")
-            self.mimi.streaming_forever(1)
-            self.other_mimi.streaming_forever(1)
-            self.lm_gen.streaming_forever(1)
-            self._streaming_initialized = True
-            logger.info("Streaming state initialized")
+        # Initialize streaming
+        self.mimi.streaming_forever(1)
+        self.lm_gen.streaming_forever(1)
+
+        logger.info(f"ServerState initialized on {device}")
 
     def warmup(self):
         """Warmup the model with dummy frames."""
         logger.info("Warming up model...")
 
-        # Initialize streaming state first
-        self._ensure_streaming()
         self.mimi.reset_streaming()
-        self.other_mimi.reset_streaming()
         self.lm_gen.reset_streaming()
 
-        # All models on same device (GPU)
         for _ in range(4):
             chunk = torch.zeros(1, 1, self.frame_size, dtype=torch.float32, device=self.device)
             codes = self.mimi.encode(chunk)
-            _ = self.other_mimi.encode(chunk)
             for c in range(codes.shape[-1]):
                 tokens = self.lm_gen.step(codes[:, :, c: c + 1])
                 if tokens is None:
                     continue
-                _ = self.mimi.decode(tokens[:, 1:9])
-                _ = self.other_mimi.decode(tokens[:, 1:9])
+                _ = self.mimi.decode(tokens[:, 1:])
 
-        if self.device.type == 'cuda':
-            torch.cuda.synchronize()
+        torch.cuda.synchronize()
         logger.info("Warmup complete")
 
-    async def handle_chat(self, request):
-        """Handle a WebSocket chat connection."""
-        ws = web.WebSocketResponse()
-        await ws.prepare(request)
+    async def decode_and_send(self, tokens: torch.Tensor, ws: web.WebSocketResponse,
+                              opus_writer: sphn.OpusStreamWriter):
+        """Decode tokens to audio and send via WebSocket."""
+        main_pcm = self.mimi.decode(tokens[:, 1:])
+        main_pcm = main_pcm.cpu()
+        opus_bytes = opus_writer.append_pcm(main_pcm[0, 0].numpy())
+        if len(opus_bytes) > 0:
+            await ws.send_bytes(bytes([MSG_AUDIO]) + opus_bytes)
 
-        peer = request.remote
-        logger.info(f"Incoming connection from {peer}")
+        text_token = tokens[0, 0, 0].item()
+        if text_token not in (0, 3):
+            text_piece = self.text_tokenizer.id_to_piece(text_token)
+            text_piece = text_piece.replace("▁", " ")
+            await ws.send_bytes(bytes([MSG_TEXT]) + text_piece.encode('utf-8'))
 
-        voice_prompt = request.query.get("voice_prompt", "NATF1.pt")
-        text_prompt = request.query.get("text_prompt", "")
+    async def recv_loop(self, ws: web.WebSocketResponse,
+                        opus_reader: sphn.OpusStreamReader,
+                        opus_writer: sphn.OpusStreamWriter):
+        """Main receive and process loop."""
+        all_pcm_data = None
+        skip_frames = 1
+        frame_count = 0
 
-        voice_prompt_path = None
-        if self.voice_prompt_dir:
-            voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt)
-            if not os.path.exists(voice_prompt_path):
-                logger.error(f"Voice prompt not found: {voice_prompt_path}")
-                await ws.send_bytes(bytes([MSG_ERROR]) + b"Voice prompt not found")
-                await ws.close()
-                return ws
-
-        if voice_prompt_path and self.lm_gen.voice_prompt != voice_prompt_path:
-            if voice_prompt_path.endswith('.pt'):
-                self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
-            else:
-                self.lm_gen.load_voice_prompt(voice_prompt_path)
-
-        if text_prompt:
-            self.lm_gen.text_prompt_tokens = self.text_tokenizer.encode(wrap_with_system_tags(text_prompt))
-        else:
-            self.lm_gen.text_prompt_tokens = None
-
-        close = False
-
-        async def recv_loop(opus_reader):
-            nonlocal close
+        try:
             async for message in ws:
                 if message.type == aiohttp.WSMsgType.ERROR:
                     logger.error(f"WebSocket error: {ws.exception()}")
                     break
-                elif message.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSE):
+                elif message.type == aiohttp.WSMsgType.CLOSED:
                     break
                 elif message.type != aiohttp.WSMsgType.BINARY:
                     logger.warning(f"Unexpected message type: {message.type}")
@@ -266,7 +216,40 @@ class ServerState:
                 payload = data[1:]
 
                 if kind == MSG_AUDIO:
-                    opus_reader.append_bytes(payload)
+                    pcm = opus_reader.append_bytes(payload)
+                    if pcm.shape[-1] == 0:
+                        continue
+
+                    if all_pcm_data is None:
+                        all_pcm_data = pcm
+                    else:
+                        all_pcm_data = np.concatenate((all_pcm_data, pcm))
+
+                    while all_pcm_data.shape[-1] >= self.frame_size:
+                        frame_count += 1
+                        if frame_count <= 5:
+                            logger.info(f"Processing frame {frame_count}")
+
+                        be = time.time()
+                        chunk = all_pcm_data[:self.frame_size]
+                        all_pcm_data = all_pcm_data[self.frame_size:]
+
+                        chunk_tensor = torch.from_numpy(chunk).to(device=self.device)[None, None]
+                        codes = self.mimi.encode(chunk_tensor)
+
+                        if skip_frames:
+                            # First frame is in the past from model's perspective
+                            self.mimi.reset_streaming()
+                            skip_frames -= 1
+
+                        for c in range(codes.shape[-1]):
+                            tokens = self.lm_gen.step(codes[:, :, c: c + 1])
+                            if tokens is None:
+                                continue
+                            await self.decode_and_send(tokens, ws, opus_writer)
+
+                        logger.debug(f"Frame handled in {1000 * (time.time() - be):.1f}ms")
+
                 elif kind == MSG_CONTROL:
                     logger.info(f"Control message: {payload}")
                 elif kind == MSG_METADATA:
@@ -274,108 +257,37 @@ class ServerState:
                 else:
                     logger.warning(f"Unknown message kind: {kind}")
 
-            close = True
-            logger.info("Receive loop ended")
+        finally:
+            logger.info(f"Connection closed after {frame_count} frames")
 
-        async def opus_loop(opus_reader, opus_writer):
-            nonlocal close
-            all_pcm_data = None
-            frame_count = 0
+    async def handle_chat(self, request):
+        """Handle a WebSocket chat connection."""
+        ws = web.WebSocketResponse()
+        await ws.prepare(request)
 
-            while not close:
-                await asyncio.sleep(0.001)
-                pcm = opus_reader.read_pcm()
+        peer = request.remote
+        logger.info(f"Incoming connection from {peer}")
 
-                if pcm.shape[-1] == 0:
-                    continue
-
-                if all_pcm_data is None:
-                    all_pcm_data = pcm
-                else:
-                    all_pcm_data = np.concatenate((all_pcm_data, pcm))
-
-                while all_pcm_data.shape[-1] >= self.frame_size:
-                    frame_count += 1
-                    if frame_count <= 5:
-                        logger.info(f"Processing frame {frame_count}")
-
-                    chunk = all_pcm_data[:self.frame_size]
-                    all_pcm_data = all_pcm_data[self.frame_size:]
-
-                    # All models on GPU
-                    chunk_tensor = torch.from_numpy(chunk).to(self.device)[None, None]
-                    codes = self.mimi.encode(chunk_tensor)
-                    _ = self.other_mimi.encode(chunk_tensor)
-
-                    for c in range(codes.shape[-1]):
-                        tokens = self.lm_gen.step(codes[:, :, c: c + 1])
-                        if tokens is None:
-                            continue
-
-                        main_pcm = self.mimi.decode(tokens[:, 1:9])
-                        _ = self.other_mimi.decode(tokens[:, 1:9])
-                        opus_writer.append_pcm(main_pcm[0, 0].cpu().numpy())
-
-                        text_token = tokens[0, 0, 0].item()
-                        if text_token not in (0, 3):
-                            text_piece = self.text_tokenizer.id_to_piece(text_token)
-                            text_piece = text_piece.replace("▁", " ")
-                            msg = bytes([MSG_TEXT]) + text_piece.encode('utf-8')
-                            await ws.send_bytes(msg)
-
-            logger.info(f"Opus loop ended after {frame_count} frames")
-
-        async def send_loop(opus_writer):
-            nonlocal close
-            while not close:
-                await asyncio.sleep(0.001)
-                msg = opus_writer.read_bytes()
-                if len(msg) > 0:
-                    await ws.send_bytes(bytes([MSG_AUDIO]) + msg)
+        # Note: Voice prompt and text prompt are logged but not currently applied
+        # (moshi 0.2.12 API doesn't support the old voice embedding format)
+        voice_prompt = request.query.get("voice_prompt", "default")
+        text_prompt = request.query.get("text_prompt", "")
+        logger.info(f"Requested voice: {voice_prompt}, persona length: {len(text_prompt)}")
 
         async with self.lock:
             opus_writer = sphn.OpusStreamWriter(self.mimi.sample_rate)
             opus_reader = sphn.OpusStreamReader(self.mimi.sample_rate)
 
-            # Initialize streaming state on first connection
-            self._ensure_streaming()
-
             self.mimi.reset_streaming()
-            self.other_mimi.reset_streaming()
             self.lm_gen.reset_streaming()
 
-            async def is_alive():
-                if close or ws.closed:
-                    return False
-                return True
+            # Send handshake
+            await ws.send_bytes(bytes([MSG_HANDSHAKE]))
+            logger.info("Sent handshake, starting audio processing")
 
-            logger.info("Priming model with system prompts...")
-            await self.lm_gen.step_system_prompts_async(self.mimi, is_alive=is_alive)
-            self.mimi.reset_streaming()
-            logger.info("System prompts complete")
+            await self.recv_loop(ws, opus_reader, opus_writer)
 
-            if await is_alive():
-                await ws.send_bytes(bytes([MSG_HANDSHAKE]))
-                logger.info("Sent handshake, starting audio loops")
-
-                tasks = [
-                    asyncio.create_task(recv_loop(opus_reader)),
-                    asyncio.create_task(opus_loop(opus_reader, opus_writer)),
-                    asyncio.create_task(send_loop(opus_writer)),
-                ]
-
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-
-                for task in pending:
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-
-                await ws.close()
-
-        logger.info("Connection closed")
+        logger.info("Done with connection")
         return ws
 
     async def handle_api(self, request):
@@ -406,7 +318,6 @@ class ServerState:
             return web.json_response({"conversations": conversations})
 
         elif action == 'save':
-            # Handle POST request to save conversation
             if request.method != 'POST':
                 return web.json_response({"error": "Method not allowed"}, status=405)
             try:
@@ -441,13 +352,11 @@ def main():
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    from moshi.models import loaders
+    from moshi.models import loaders, LMGen
 
-    # A100 has 40GB VRAM - load everything on GPU for best performance
     logger.info("Loading Mimi audio codec...")
     mimi_path = str(MODELS_DIR / "tokenizer-e351c8d8-checkpoint125.safetensors")
     mimi = loaders.get_mimi(mimi_path, device=device)
-    other_mimi = loaders.get_mimi(mimi_path, device=device)
     logger.info("Mimi loaded")
 
     logger.info("Loading text tokenizer...")
@@ -464,13 +373,15 @@ def main():
     lm.eval()
     logger.info("PersonaPlex model loaded")
 
+    # Create LMGen - note: voice prompts not currently supported in moshi 0.2.12
+    lm_gen = LMGen(lm)
+
     voice_prompt_dir = str(MODELS_DIR / "voices")
 
     state = ServerState(
         mimi=mimi,
-        other_mimi=other_mimi,
         text_tokenizer=text_tokenizer,
-        lm=lm,
+        lm_gen=lm_gen,
         device=device,
         voice_prompt_dir=voice_prompt_dir,
     )
@@ -485,6 +396,7 @@ def main():
 
     logger.info(f"Starting server on {args.host}:{args.port}")
     logger.info(f"WebSocket endpoint: ws://{args.host}:{args.port}/api/chat")
+    logger.info("NOTE: Voice selection not currently active (moshi 0.2.12 API change)")
     web.run_app(app, host=args.host, port=args.port)
 
 
