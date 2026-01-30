@@ -904,6 +904,12 @@ function ActiveConversation({ voice, persona, onEnd, serverUrl, micSettings }) {
 
       socket.onclose = () => {
         if (!mounted) return
+        // Save any remaining text to transcript
+        if (currentTextRef.current.trim()) {
+          setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
+          currentTextRef.current = ''
+          setCurrentText('')
+        }
         setStatus('connecting')
         stopRecording()
       }
@@ -1873,7 +1879,17 @@ function ActiveConversationInline({ voice, persona, serverUrl, micSettings, onEn
         }
       }
 
-      socket.onclose = () => { if (mounted) { setStatus('connecting'); stopRecording() } }
+      socket.onclose = () => {
+        if (!mounted) return
+        // Save any remaining text to transcript
+        if (currentTextRef.current.trim()) {
+          setTranscript(prev => [...prev, { speaker: 'ai', text: currentTextRef.current.trim(), timestamp: new Date() }])
+          currentTextRef.current = ''
+          setCurrentText('')
+        }
+        setStatus('connecting')
+        stopRecording()
+      }
       socket.onerror = (err) => { console.error('WebSocket error:', err); setErrorMessage('Connection error'); setStatus('error') }
     }
 
