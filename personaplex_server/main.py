@@ -216,7 +216,10 @@ class ServerState:
                 payload = data[1:]
 
                 if kind == MSG_AUDIO:
-                    pcm = opus_reader.append_bytes(payload)
+                    # Buffer the opus data
+                    opus_reader.append_bytes(payload)
+                    # Read decoded PCM (separate call)
+                    pcm = opus_reader.read_pcm()
                     if pcm is None or pcm.shape[-1] == 0:
                         continue
 
