@@ -424,7 +424,7 @@ def main():
 
     logger.info(f"Starting server on {args.host}:{args.port}")
     logger.info(f"WebSocket endpoint: ws://{args.host}:{args.port}/api/chat")
-    logger.info("NOTE: Voice selection not currently active (moshi 0.2.12 API change)")
+    logger.info("Voice selection: PersonaPlex moshi installed - 18 voices available")
     web.run_app(app, host=args.host, port=args.port)
 
 
